@@ -17,8 +17,12 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub provider: String,
+    /// Model name or alias. For `claude-cli`, this maps to `claude --model <model>`.
     pub model: String,
     pub api_key_env: String,
+    /// Timeout (seconds) for an LLM completion request.
+    #[serde(default = "default_llm_timeout_seconds")]
+    pub timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +40,10 @@ pub struct SpecConfig {
 
 fn default_max_loop_iterations() -> u32 {
     5
+}
+
+fn default_llm_timeout_seconds() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,8 +87,10 @@ impl Default for Config {
         Config {
             llm: LlmConfig {
                 provider: "claude-cli".to_string(),
-                model: "".to_string(),
+                // Prefer a fast, widely-available default. Users can override.
+                model: "sonnet".to_string(),
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
+                timeout_seconds: default_llm_timeout_seconds(),
             },
             output: OutputConfig {
                 base_dir: ".".to_string(),
@@ -159,8 +169,9 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.llm.provider, "claude-cli");
-        assert_eq!(config.llm.model, "");
+        assert_eq!(config.llm.model, "sonnet");
         assert_eq!(config.llm.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(config.llm.timeout_seconds, 300);
         assert_eq!(config.output.base_dir, ".");
         assert!(config.output.obsidian_dir.is_empty());
         assert_eq!(config.spec.question_budget, 8);
@@ -183,6 +194,7 @@ mod tests {
         let config = load_config_from(&path).unwrap();
         assert!(path.exists());
         assert_eq!(config.llm.provider, "claude-cli");
+        assert_eq!(config.llm.timeout_seconds, 300);
     }
 
     #[test]
@@ -195,6 +207,7 @@ mod tests {
 provider = "openai"
 model = "gpt-4"
 api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 123
 
 [output]
 base_dir = "./output"
@@ -209,6 +222,7 @@ question_budget = 5
         assert_eq!(config.llm.provider, "openai");
         assert_eq!(config.llm.model, "gpt-4");
         assert_eq!(config.llm.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(config.llm.timeout_seconds, 123);
         assert_eq!(config.output.base_dir, "./output");
         assert_eq!(config.output.obsidian_dir, "/vault");
         assert_eq!(config.spec.question_budget, 5);
@@ -220,6 +234,7 @@ question_budget = 5
         let path = tmp.path().join("a").join("b").join("config.toml");
         let config = load_config_from(&path).unwrap();
         assert_eq!(config.llm.provider, "claude-cli");
+        assert_eq!(config.llm.timeout_seconds, 300);
         assert!(path.exists());
     }
 

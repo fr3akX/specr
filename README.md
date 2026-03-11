@@ -79,8 +79,9 @@ Config file: `~/.config/specr/config.toml` (auto-created with defaults on first 
 ```toml
 [llm]
 provider = "claude-cli"          # claude-cli | anthropic | openai
-model = ""                       # optional model override (empty = CLI default)
+model = "sonnet"                 # model alias or full name (e.g. claude-sonnet-4-6)
 api_key_env = "ANTHROPIC_API_KEY"  # only needed for anthropic/openai providers
+timeout_seconds = 300             # timeout for a single completion request
 
 [output]
 base_dir = "."                   # where SPEC.md / TASKS.md are written

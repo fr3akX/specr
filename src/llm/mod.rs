@@ -30,13 +30,16 @@ pub fn create_client(config: &Config, api_key: &str) -> Result<Box<dyn LlmClient
         ))),
         "claude-cli" => {
             let bin = config.agent.runner_bin.clone();
-            // Use model from llm config if set, otherwise let the CLI use its default
             let model = if config.llm.model.is_empty() {
                 None
             } else {
                 Some(config.llm.model.clone())
             };
-            Ok(Box::new(claude_cli::ClaudeCliClient::new(bin, model)))
+            Ok(Box::new(claude_cli::ClaudeCliClient::new(
+                bin,
+                model,
+                config.llm.timeout_seconds,
+            )))
         }
         other => Err(anyhow::anyhow!(
             "Unknown LLM provider: {other}. Use 'anthropic', 'openai', or 'claude-cli'."
@@ -57,6 +60,7 @@ mod tests {
         }
         .to_string();
         config.llm.api_key_env = "TEST_KEY".to_string();
+        config.llm.timeout_seconds = 5;
         config
     }
 
