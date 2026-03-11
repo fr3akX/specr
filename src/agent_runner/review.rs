@@ -1,0 +1,268 @@
+use anyhow::Result;
+
+use crate::llm::LlmClient;
+use crate::types::Finding;
+
+/// Result of running all three parallel reviews.
+#[derive(Debug, Clone)]
+pub struct ReviewResult {
+    pub code_review: Finding,
+    pub qa_review: Finding,
+    pub style_review: Finding,
+}
+
+const CODE_REVIEW_SYSTEM: &str = r#"You are a senior software engineer doing a code review. You receive a SPEC.md, a task definition, and a git diff. Evaluate:
+- Does the implementation match the spec contract?
+- Are there correctness bugs or security issues?
+- Are error cases handled?
+- Are all "done when" criteria met?
+
+Output JSON only:
+{"verdict":"pass|fail","critical":["..."],"warnings":["..."],"suggestions":["..."]}
+Critical = must fix before merge. Warnings = should fix. Suggestions = optional."#;
+
+const QA_REVIEW_SYSTEM: &str = r#"You are a QA engineer reviewing unit tests. You receive a SPEC.md, a task definition, and a git diff. Evaluate:
+- Do the tests actually test behaviour, not just lines?
+- Are edge cases covered?
+- Would any test pass if the implementation was subtly wrong?
+- Is 90% coverage achievable with these tests?
+
+Output JSON only:
+{"verdict":"pass|fail","critical":["..."],"warnings":["..."],"suggestions":["..."]}
+"#;
+
+const STYLE_REVIEW_SYSTEM: &str = r#"You are a code quality reviewer. You receive a SPEC.md, a task definition, and a git diff. Evaluate:
+- Is the code unnecessarily complex?
+- Are there simpler ways to express the same logic?
+- Are names clear and consistent?
+- Are there any obvious refactoring opportunities?
+
+Output JSON only:
+{"verdict":"pass|fail","critical":["..."],"warnings":["..."],"suggestions":["..."]}
+Style issues are rarely critical — only mark critical if the code is genuinely unreadable or has a major structural problem."#;
+
+/// Build the user prompt containing spec, task detail, and diff.
+fn build_review_user_prompt(spec_content: &str, task_detail: &str, diff: &str) -> String {
+    format!(
+        "SPEC.md:\n{}\n\nTask details:\n{}\n\nGit diff:\n{}",
+        spec_content, task_detail, diff
+    )
+}
+
+/// Parse a JSON review response into a Finding.
+pub fn parse_finding(response: &str) -> Finding {
+    // Try to extract JSON from the response (may have markdown wrapping)
+    let json_str = extract_json(response);
+
+    match serde_json::from_str::<Finding>(json_str) {
+        Ok(finding) => finding,
+        Err(_) => Finding::invalid_json("Review agent returned invalid JSON"),
+    }
+}
+
+/// Extract JSON from a response that may have markdown code fences.
+fn extract_json(response: &str) -> &str {
+    let trimmed = response.trim();
+
+    // Try to find JSON block in code fences
+    if let Some(start) = trimmed.find("```json") {
+        let after_fence = &trimmed[start + 7..];
+        if let Some(end) = after_fence.find("```") {
+            return after_fence[..end].trim();
+        }
+    }
+
+    if let Some(start) = trimmed.find("```") {
+        let after_fence = &trimmed[start + 3..];
+        if let Some(end) = after_fence.find("```") {
+            return after_fence[..end].trim();
+        }
+    }
+
+    // Try raw JSON (starts with {)
+    if let Some(start) = trimmed.find('{') {
+        if let Some(end) = trimmed.rfind('}') {
+            return &trimmed[start..=end];
+        }
+    }
+
+    trimmed
+}
+
+/// Run all three reviews concurrently.
+pub async fn run_reviews(
+    llm: &dyn LlmClient,
+    spec_content: &str,
+    task_detail: &str,
+    diff: &str,
+) -> Result<ReviewResult> {
+    let user_prompt = build_review_user_prompt(spec_content, task_detail, diff);
+
+    let (code_resp, qa_resp, style_resp) = tokio::try_join!(
+        llm.complete(CODE_REVIEW_SYSTEM, &user_prompt),
+        llm.complete(QA_REVIEW_SYSTEM, &user_prompt),
+        llm.complete(STYLE_REVIEW_SYSTEM, &user_prompt),
+    )?;
+
+    Ok(ReviewResult {
+        code_review: parse_finding(&code_resp),
+        qa_review: parse_finding(&qa_resp),
+        style_review: parse_finding(&style_resp),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Verdict;
+
+    #[test]
+    fn test_parse_finding_valid_pass() {
+        let json = r#"{"verdict":"pass","critical":[],"warnings":["minor thing"],"suggestions":["use const"]}"#;
+        let finding = parse_finding(json);
+        assert_eq!(finding.verdict, Verdict::Pass);
+        assert!(finding.critical.is_empty());
+        assert_eq!(finding.warnings.len(), 1);
+        assert_eq!(finding.suggestions.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_finding_valid_fail() {
+        let json = r#"{"verdict":"fail","critical":["missing error handling"],"warnings":[],"suggestions":[]}"#;
+        let finding = parse_finding(json);
+        assert_eq!(finding.verdict, Verdict::Fail);
+        assert_eq!(finding.critical.len(), 1);
+        assert_eq!(finding.critical[0], "missing error handling");
+    }
+
+    #[test]
+    fn test_parse_finding_invalid_json() {
+        let finding = parse_finding("not json at all");
+        assert_eq!(finding.verdict, Verdict::Fail);
+        assert_eq!(finding.critical.len(), 1);
+        assert!(finding.critical[0].contains("invalid JSON"));
+    }
+
+    #[test]
+    fn test_parse_finding_empty_string() {
+        let finding = parse_finding("");
+        assert_eq!(finding.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn test_parse_finding_with_code_fence() {
+        let response = "Here is my review:\n```json\n{\"verdict\":\"pass\",\"critical\":[],\"warnings\":[],\"suggestions\":[]}\n```";
+        let finding = parse_finding(response);
+        assert_eq!(finding.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn test_parse_finding_with_generic_fence() {
+        let response = "```\n{\"verdict\":\"fail\",\"critical\":[\"bug\"],\"warnings\":[],\"suggestions\":[]}\n```";
+        let finding = parse_finding(response);
+        assert_eq!(finding.verdict, Verdict::Fail);
+        assert_eq!(finding.critical[0], "bug");
+    }
+
+    #[test]
+    fn test_parse_finding_json_with_surrounding_text() {
+        let response = "My analysis:\n{\"verdict\":\"pass\",\"critical\":[],\"warnings\":[],\"suggestions\":[]}\nEnd of review.";
+        let finding = parse_finding(response);
+        assert_eq!(finding.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn test_build_review_user_prompt() {
+        let prompt = build_review_user_prompt("spec", "task", "diff content");
+        assert!(prompt.contains("SPEC.md:\nspec"));
+        assert!(prompt.contains("Task details:\ntask"));
+        assert!(prompt.contains("Git diff:\ndiff content"));
+    }
+
+    #[test]
+    fn test_extract_json_raw() {
+        let result = extract_json(r#"{"verdict":"pass"}"#);
+        assert!(result.contains("verdict"));
+    }
+
+    #[test]
+    fn test_extract_json_fenced() {
+        let result = extract_json("```json\n{\"verdict\":\"pass\"}\n```");
+        assert!(result.contains("verdict"));
+    }
+
+    #[test]
+    fn test_system_prompts_contain_json_format() {
+        assert!(CODE_REVIEW_SYSTEM.contains("verdict"));
+        assert!(QA_REVIEW_SYSTEM.contains("verdict"));
+        assert!(STYLE_REVIEW_SYSTEM.contains("verdict"));
+    }
+
+    #[tokio::test]
+    async fn test_run_reviews_with_mock() {
+        use async_trait::async_trait;
+
+        struct MockLlm;
+
+        #[async_trait]
+        impl LlmClient for MockLlm {
+            async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                Ok(r#"{"verdict":"pass","critical":[],"warnings":[],"suggestions":[]}"#.to_string())
+            }
+        }
+
+        let llm = MockLlm;
+        let result = run_reviews(&llm, "spec", "task", "diff").await.unwrap();
+        assert_eq!(result.code_review.verdict, Verdict::Pass);
+        assert_eq!(result.qa_review.verdict, Verdict::Pass);
+        assert_eq!(result.style_review.verdict, Verdict::Pass);
+    }
+
+    #[tokio::test]
+    async fn test_run_reviews_mixed_results() {
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct MockLlm {
+            call_count: AtomicU32,
+        }
+
+        #[async_trait]
+        impl LlmClient for MockLlm {
+            async fn complete(&self, system: &str, _user: &str) -> Result<String> {
+                let _ = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if system.contains("senior software engineer") {
+                    Ok(r#"{"verdict":"fail","critical":["bug found"],"warnings":[],"suggestions":[]}"#.to_string())
+                } else {
+                    Ok(r#"{"verdict":"pass","critical":[],"warnings":[],"suggestions":[]}"#.to_string())
+                }
+            }
+        }
+
+        let llm = MockLlm {
+            call_count: AtomicU32::new(0),
+        };
+        let result = run_reviews(&llm, "spec", "task", "diff").await.unwrap();
+        assert_eq!(result.code_review.verdict, Verdict::Fail);
+        assert_eq!(result.qa_review.verdict, Verdict::Pass);
+        assert_eq!(result.style_review.verdict, Verdict::Pass);
+    }
+
+    #[tokio::test]
+    async fn test_run_reviews_llm_error() {
+        use async_trait::async_trait;
+
+        struct FailingLlm;
+
+        #[async_trait]
+        impl LlmClient for FailingLlm {
+            async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+                anyhow::bail!("API error")
+            }
+        }
+
+        let llm = FailingLlm;
+        let result = run_reviews(&llm, "spec", "task", "diff").await;
+        assert!(result.is_err());
+    }
+}
