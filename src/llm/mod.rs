@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod claude_cli;
 pub mod openai;
 
 use anyhow::Result;
@@ -13,6 +14,10 @@ pub trait LlmClient: Send + Sync {
 }
 
 /// Create the appropriate LLM client based on config.
+///
+/// For `claude-cli` provider, no API key is needed — it uses the `claude`
+/// binary already configured on the system (Claude Code subscription).
+/// Pass an empty string for `api_key` in that case.
 pub fn create_client(config: &Config, api_key: &str) -> Result<Box<dyn LlmClient>> {
     match config.llm.provider.as_str() {
         "anthropic" => Ok(Box::new(anthropic::AnthropicClient::new(
@@ -23,8 +28,18 @@ pub fn create_client(config: &Config, api_key: &str) -> Result<Box<dyn LlmClient
             api_key.to_string(),
             config.llm.model.clone(),
         ))),
+        "claude-cli" => {
+            let bin = config.agent.runner_bin.clone();
+            // Use model from llm config if set, otherwise let the CLI use its default
+            let model = if config.llm.model.is_empty() {
+                None
+            } else {
+                Some(config.llm.model.clone())
+            };
+            Ok(Box::new(claude_cli::ClaudeCliClient::new(bin, model)))
+        }
         other => Err(anyhow::anyhow!(
-            "Unknown LLM provider: {other}. Use 'anthropic' or 'openai'."
+            "Unknown LLM provider: {other}. Use 'anthropic', 'openai', or 'claude-cli'."
         )),
     }
 }
@@ -51,6 +66,13 @@ mod tests {
     fn test_create_openai_client() {
         let config = make_config("openai");
         let client = create_client(&config, "sk-test");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_create_claude_cli_client() {
+        let config = make_config("claude-cli");
+        let client = create_client(&config, "");
         assert!(client.is_ok());
     }
 

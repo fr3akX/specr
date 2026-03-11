@@ -59,29 +59,29 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Compose { idea } => {
-            let api_key = config::resolve_api_key(&config)?;
+            let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             let output_dir = std::path::Path::new(&config.output.base_dir);
             spec_composer::compose(&idea, &config, client.as_ref(), output_dir).await?;
         }
         Commands::Refine => {
-            let api_key = config::resolve_api_key(&config)?;
+            let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             let dir = std::env::current_dir()?;
             spec_composer::refine(&config, client.as_ref(), &dir).await?;
         }
         Commands::Tasks => {
-            let api_key = config::resolve_api_key(&config)?;
+            let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             task_generator::run(&config, client.as_ref()).await?;
         }
         Commands::Split { task } => {
-            let api_key = config::resolve_api_key(&config)?;
+            let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             task_generator::split(&config, client.as_ref(), &task).await?;
         }
         Commands::Run { task } => {
-            let api_key = config::resolve_api_key(&config)?;
+            let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             agent_runner::run(&config, client.as_ref(), task.as_deref()).await?;
         }

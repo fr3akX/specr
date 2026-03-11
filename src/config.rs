@@ -142,6 +142,14 @@ pub fn resolve_api_key(config: &Config) -> Result<String> {
     })
 }
 
+/// Resolve the API key, returning an empty string for providers that don't need one (e.g. claude-cli).
+pub fn resolve_api_key_optional(config: &Config) -> Result<String> {
+    if config.llm.provider == "claude-cli" {
+        return Ok(String::new());
+    }
+    resolve_api_key(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
