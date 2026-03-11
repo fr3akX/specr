@@ -65,9 +65,7 @@ impl CodingAgent {
         retry_findings: Option<&str>,
     ) -> Result<()> {
         let prompt = match retry_findings {
-            Some(findings) => {
-                Self::build_retry_prompt(task, spec_content, task_detail, findings)
-            }
+            Some(findings) => Self::build_retry_prompt(task, spec_content, task_detail, findings),
             None => Self::build_prompt(task, spec_content, task_detail),
         };
 

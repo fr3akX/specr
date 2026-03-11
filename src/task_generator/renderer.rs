@@ -123,10 +123,8 @@ pub fn parse_tasks_md(content: &str) -> Result<(Vec<Task>, u32)> {
 
     // Parse task entries
     // Pattern: - [ ] 001 · Name [S]  or  - [x] 001 · Name [L -> split]
-    let task_re = Regex::new(
-        r"- \[([x ])\] (\d+) \u{00b7} (.+?) \[([SML])(?: -> split)?\]"
-    )
-    .context("Invalid task regex")?;
+    let task_re = Regex::new(r"- \[([x ])\] (\d+) \u{00b7} (.+?) \[([SML])(?: -> split)?\]")
+        .context("Invalid task regex")?;
 
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;

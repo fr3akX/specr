@@ -24,8 +24,15 @@ pub async fn compose(
     client: &dyn LlmClient,
     output_dir: &Path,
 ) -> Result<()> {
-    compose_with_io(idea, config, client, output_dir, &mut io::stdin().lock(), &mut io::stdout())
-        .await
+    compose_with_io(
+        idea,
+        config,
+        client,
+        output_dir,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+    )
+    .await
 }
 
 /// Compose with injectable I/O for testing.
@@ -87,11 +94,7 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
         writeln!(writer, "{}\n", "--- END DRAFT ---".bold().green())?;
 
         // Step 5: Ask for approval
-        writeln!(
-            writer,
-            "{}",
-            "Approve? (yes / edit <section> / no)".bold()
-        )?;
+        writeln!(writer, "{}", "Approve? (yes / edit <section> / no)".bold())?;
         write!(writer, "> ")?;
         writer.flush()?;
 
@@ -153,13 +156,15 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
 }
 
 /// Run the refine pipeline: load existing SPEC.md, edit sections, re-approve.
-pub async fn refine(
-    config: &Config,
-    client: &dyn LlmClient,
-    dir: &Path,
-) -> Result<()> {
-    refine_with_io(config, client, dir, &mut io::stdin().lock(), &mut io::stdout())
-        .await
+pub async fn refine(config: &Config, client: &dyn LlmClient, dir: &Path) -> Result<()> {
+    refine_with_io(
+        config,
+        client,
+        dir,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+    )
+    .await
 }
 
 /// Refine with injectable I/O for testing.
@@ -323,9 +328,16 @@ mod tests {
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
-        compose_with_io("Build a todo app", &config, &client, tmp.path(), &mut reader, &mut output)
-            .await
-            .unwrap();
+        compose_with_io(
+            "Build a todo app",
+            &config,
+            &client,
+            tmp.path(),
+            &mut reader,
+            &mut output,
+        )
+        .await
+        .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("SPEC.md written to"));
@@ -342,9 +354,16 @@ mod tests {
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
-        compose_with_io("idea", &config, &client, tmp.path(), &mut reader, &mut output)
-            .await
-            .unwrap();
+        compose_with_io(
+            "idea",
+            &config,
+            &client,
+            tmp.path(),
+            &mut reader,
+            &mut output,
+        )
+        .await
+        .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("Aborted"));
@@ -362,9 +381,16 @@ mod tests {
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
-        compose_with_io("idea", &config, &client, tmp.path(), &mut reader, &mut output)
-            .await
-            .unwrap();
+        compose_with_io(
+            "idea",
+            &config,
+            &client,
+            tmp.path(),
+            &mut reader,
+            &mut output,
+        )
+        .await
+        .unwrap();
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains("(skipped)"));
@@ -445,7 +471,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_consistency_with_issues() {
-        let client = MockLlmClient::new("The stack section mentions Python but the goal says Rust.");
+        let client =
+            MockLlmClient::new("The stack section mentions Python but the goal says Rust.");
         let result = check_consistency(&client, "spec content").await.unwrap();
         assert!(result.is_some());
         assert!(result.unwrap().contains("Python"));

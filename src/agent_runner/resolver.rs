@@ -38,7 +38,8 @@ impl Resolver {
         let mut groups: Vec<Vec<&'a Task>> = Vec::new();
 
         for task in eligible {
-            let task_files: HashSet<&str> = task.files_to_touch.iter().map(|f| f.as_str()).collect();
+            let task_files: HashSet<&str> =
+                task.files_to_touch.iter().map(|f| f.as_str()).collect();
 
             // Try to find an existing group with no file conflicts
             let mut placed = false;
@@ -216,9 +217,7 @@ mod tests {
 
     #[test]
     fn test_parallel_groups_empty_eligible() {
-        let tasks = vec![
-            make_task("001", TaskSize::L, TaskStatus::Open, vec![]),
-        ];
+        let tasks = vec![make_task("001", TaskSize::L, TaskStatus::Open, vec![])];
         let groups = Resolver::parallel_groups(&tasks);
         assert!(groups.is_empty());
     }
@@ -228,7 +227,13 @@ mod tests {
         let tasks = vec![
             make_task_with_files("001", TaskSize::S, TaskStatus::Open, vec![], vec!["a.rs"]),
             make_task_with_files("002", TaskSize::S, TaskStatus::Open, vec![], vec!["b.rs"]),
-            make_task_with_files("003", TaskSize::S, TaskStatus::Open, vec![], vec!["a.rs", "c.rs"]),
+            make_task_with_files(
+                "003",
+                TaskSize::S,
+                TaskStatus::Open,
+                vec![],
+                vec!["a.rs", "c.rs"],
+            ),
         ];
         let groups = Resolver::parallel_groups(&tasks);
         // 001 and 002 can be parallel (different files)

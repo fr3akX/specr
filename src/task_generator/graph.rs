@@ -17,11 +17,7 @@ impl DependencyGraph {
         for task in &tasks {
             for dep in &task.depends_on {
                 if !ids.contains(dep.as_str()) {
-                    bail!(
-                        "Task {} depends on non-existent task {}",
-                        task.id,
-                        dep
-                    );
+                    bail!("Task {} depends on non-existent task {}", task.id, dep);
                 }
             }
         }
@@ -258,10 +254,7 @@ mod tests {
 
     #[test]
     fn test_eligible_tasks_none_when_blocked() {
-        let tasks = vec![
-            make_task("001", vec![]),
-            make_task("002", vec!["001"]),
-        ];
+        let tasks = vec![make_task("001", vec![]), make_task("002", vec!["001"])];
         let graph = DependencyGraph::build(tasks).unwrap();
         let eligible = graph.eligible_tasks();
         // 001 is open, has no deps, so it's eligible

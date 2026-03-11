@@ -207,7 +207,10 @@ mod tests {
         #[async_trait]
         impl LlmClient for MockLlm {
             async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
-                Ok(r#"{"verdict":"pass","critical":[],"warnings":[],"suggestions":[]}"#.to_string())
+                Ok(
+                    r#"{"verdict":"pass","critical":[],"warnings":[],"suggestions":[]}"#
+                        .to_string(),
+                )
             }
         }
 
@@ -234,7 +237,10 @@ mod tests {
                 if system.contains("senior software engineer") {
                     Ok(r#"{"verdict":"fail","critical":["bug found"],"warnings":[],"suggestions":[]}"#.to_string())
                 } else {
-                    Ok(r#"{"verdict":"pass","critical":[],"warnings":[],"suggestions":[]}"#.to_string())
+                    Ok(
+                        r#"{"verdict":"pass","critical":[],"warnings":[],"suggestions":[]}"#
+                            .to_string(),
+                    )
                 }
             }
         }

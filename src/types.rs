@@ -36,7 +36,9 @@ impl std::str::FromStr for TaskSize {
             "S" => Ok(TaskSize::S),
             "M" => Ok(TaskSize::M),
             "L" => Ok(TaskSize::L),
-            other => Err(anyhow::anyhow!("Unknown task size: {other}. Use S, M, or L.")),
+            other => Err(anyhow::anyhow!(
+                "Unknown task size: {other}. Use S, M, or L."
+            )),
         }
     }
 }
@@ -161,7 +163,9 @@ impl std::str::FromStr for Verdict {
         match s.trim().to_lowercase().as_str() {
             "pass" => Ok(Verdict::Pass),
             "fail" => Ok(Verdict::Fail),
-            other => Err(anyhow::anyhow!("Unknown verdict: {other}. Use 'pass' or 'fail'.")),
+            other => Err(anyhow::anyhow!(
+                "Unknown verdict: {other}. Use 'pass' or 'fail'."
+            )),
         }
     }
 }
@@ -215,7 +219,9 @@ impl std::str::FromStr for Provider {
         match s.to_lowercase().as_str() {
             "anthropic" => Ok(Provider::Anthropic),
             "openai" => Ok(Provider::OpenAI),
-            other => Err(anyhow::anyhow!("Unknown provider: {other}. Use 'anthropic' or 'openai'.")),
+            other => Err(anyhow::anyhow!(
+                "Unknown provider: {other}. Use 'anthropic' or 'openai'."
+            )),
         }
     }
 }
@@ -252,8 +258,14 @@ mod tests {
     #[test]
     fn test_task_status_from_str() {
         assert_eq!("open".parse::<TaskStatus>().unwrap(), TaskStatus::Open);
-        assert_eq!("in-progress".parse::<TaskStatus>().unwrap(), TaskStatus::InProgress);
-        assert_eq!("in_progress".parse::<TaskStatus>().unwrap(), TaskStatus::InProgress);
+        assert_eq!(
+            "in-progress".parse::<TaskStatus>().unwrap(),
+            TaskStatus::InProgress
+        );
+        assert_eq!(
+            "in_progress".parse::<TaskStatus>().unwrap(),
+            TaskStatus::InProgress
+        );
         assert_eq!("done".parse::<TaskStatus>().unwrap(), TaskStatus::Done);
         assert_eq!("failed".parse::<TaskStatus>().unwrap(), TaskStatus::Failed);
         assert!("unknown".parse::<TaskStatus>().is_err());
@@ -436,9 +448,15 @@ mod tests {
 
     #[test]
     fn test_provider_from_str() {
-        assert_eq!("anthropic".parse::<Provider>().unwrap(), Provider::Anthropic);
+        assert_eq!(
+            "anthropic".parse::<Provider>().unwrap(),
+            Provider::Anthropic
+        );
         assert_eq!("openai".parse::<Provider>().unwrap(), Provider::OpenAI);
-        assert_eq!("Anthropic".parse::<Provider>().unwrap(), Provider::Anthropic);
+        assert_eq!(
+            "Anthropic".parse::<Provider>().unwrap(),
+            Provider::Anthropic
+        );
         assert!("unknown".parse::<Provider>().is_err());
     }
 }

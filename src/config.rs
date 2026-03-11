@@ -98,8 +98,7 @@ impl Default for Config {
 
 /// Returns the path to the config file: ~/.config/specr/config.toml
 pub fn config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .context("Could not determine config directory")?;
+    let config_dir = dirs::config_dir().context("Could not determine config directory")?;
     Ok(config_dir.join("specr").join("config.toml"))
 }
 
@@ -114,11 +113,12 @@ pub fn load_config_from(path: &Path) -> Result<Config> {
     } else {
         let config = Config::default();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory {}", parent.display())
+            })?;
         }
-        let content = toml::to_string_pretty(&config)
-            .context("Failed to serialize default config")?;
+        let content =
+            toml::to_string_pretty(&config).context("Failed to serialize default config")?;
         std::fs::write(path, &content)
             .with_context(|| format!("Failed to write default config to {}", path.display()))?;
         Ok(config)
@@ -245,6 +245,9 @@ question_budget = 5
         let deserialized: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(deserialized.llm.provider, config.llm.provider);
         assert_eq!(deserialized.llm.model, config.llm.model);
-        assert_eq!(deserialized.spec.question_budget, config.spec.question_budget);
+        assert_eq!(
+            deserialized.spec.question_budget,
+            config.spec.question_budget
+        );
     }
 }

@@ -55,10 +55,7 @@ impl TelegramNotifier {
         let bot_token = self.bot_token.as_ref().context("Missing bot token")?;
         let chat_id = self.chat_id.as_ref().context("Missing chat ID")?;
 
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 
         let client = reqwest::Client::new();
         let resp = client

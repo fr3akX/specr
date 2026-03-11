@@ -69,7 +69,12 @@ pub async fn run_with_io<R: BufRead, W: Write>(
     let project_name = extract_project_name(&spec_content);
 
     writeln!(writer, "\n{}", "=== specr tasks ===".bold().cyan())?;
-    writeln!(writer, "Project: {}  spec-version: {}\n", project_name.bold(), spec_version)?;
+    writeln!(
+        writer,
+        "Project: {}  spec-version: {}\n",
+        project_name.bold(),
+        spec_version
+    )?;
 
     // Step 2: Check for existing TASKS.md
     let existing_tasks = store::read_tasks(&dir).ok();
@@ -78,7 +83,11 @@ pub async fn run_with_io<R: BufRead, W: Write>(
 
     if let Some((ref old_tasks, old_version)) = existing_tasks {
         if old_version == spec_version {
-            writeln!(writer, "TASKS.md already exists with same spec-version ({}).", spec_version)?;
+            writeln!(
+                writer,
+                "TASKS.md already exists with same spec-version ({}).",
+                spec_version
+            )?;
             write!(writer, "Regenerate? (y/n): ")?;
             writer.flush()?;
             let mut input = String::new();
@@ -116,13 +125,19 @@ pub async fn run_with_io<R: BufRead, W: Write>(
     }
 
     // Step 3: Call LLM
-    writeln!(writer, "{}", "Decomposing spec into tasks via LLM...".cyan())?;
-    let llm_response = client.complete(TASK_DECOMPOSE_SYSTEM, &spec_content).await?;
+    writeln!(
+        writer,
+        "{}",
+        "Decomposing spec into tasks via LLM...".cyan()
+    )?;
+    let llm_response = client
+        .complete(TASK_DECOMPOSE_SYSTEM, &spec_content)
+        .await?;
 
     // Parse JSON response
     let raw_json = extract_json(&llm_response);
-    let mut tasks: Vec<Task> = parse_task_json(&raw_json)
-        .context("Failed to parse LLM task decomposition response")?;
+    let mut tasks: Vec<Task> =
+        parse_task_json(&raw_json).context("Failed to parse LLM task decomposition response")?;
 
     // Re-number tasks to avoid conflicts with preserved done tasks
     if !preserved_done.is_empty() {
@@ -136,9 +151,7 @@ pub async fn run_with_io<R: BufRead, W: Write>(
         let id_map: Vec<(String, String)> = tasks
             .iter()
             .enumerate()
-            .map(|(i, t)| {
-                (t.id.clone(), format!("{:03}", max_existing + 1 + i as u32))
-            })
+            .map(|(i, t)| (t.id.clone(), format!("{:03}", max_existing + 1 + i as u32)))
             .collect();
 
         // Apply mapping
@@ -160,9 +173,11 @@ pub async fn run_with_io<R: BufRead, W: Write>(
     all_tasks.extend(tasks);
 
     // Step 4: Validate dependency graph
-    let graph = DependencyGraph::build(all_tasks.clone())
-        .context("Failed to build dependency graph")?;
-    graph.validate().context("Dependency graph validation failed")?;
+    let graph =
+        DependencyGraph::build(all_tasks.clone()).context("Failed to build dependency graph")?;
+    graph
+        .validate()
+        .context("Dependency graph validation failed")?;
 
     // Step 5: Show warnings for in-progress tasks
     if !in_progress_warnings.is_empty() {
@@ -195,11 +210,20 @@ pub async fn run_with_io<R: BufRead, W: Write>(
         writeln!(
             writer,
             "  {} {} \u{00b7} {} {}  [{}]  deps: {}",
-            task.id, size_badge, task.name, status_badge, task.done_when.dimmed(), deps
+            task.id,
+            size_badge,
+            task.name,
+            status_badge,
+            task.done_when.dimmed(),
+            deps
         )?;
 
         if task.size == TaskSize::L {
-            writeln!(writer, "    {} This task is size L and should be split.", "!".red().bold())?;
+            writeln!(
+                writer,
+                "    {} This task is size L and should be split.",
+                "!".red().bold()
+            )?;
         }
     }
 
@@ -224,7 +248,14 @@ pub async fn run_with_io<R: BufRead, W: Write>(
 
     if input == "yes" || input == "y" {
         // Step 9: Write files
-        write_task_files(&dir, &all_tasks, spec_version, &project_name, config, writer)?;
+        write_task_files(
+            &dir,
+            &all_tasks,
+            spec_version,
+            &project_name,
+            config,
+            writer,
+        )?;
         return Ok(());
     } else if input == "no" || input == "n" {
         writeln!(writer, "{}", "Aborted. No files written.".yellow())?;
@@ -244,7 +275,14 @@ pub async fn run_with_io<R: BufRead, W: Write>(
 
 /// Run the task splitting pipeline for a specific task.
 pub async fn split(config: &Config, client: &dyn LlmClient, task_id: &str) -> Result<()> {
-    split_with_io(config, client, task_id, &mut io::stdin().lock(), &mut io::stdout()).await
+    split_with_io(
+        config,
+        client,
+        task_id,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+    )
+    .await
 }
 
 /// Split with injectable I/O for testing.
@@ -268,15 +306,28 @@ pub async fn split_with_io<R: BufRead, W: Write>(
 
     let task = &tasks[task_idx];
     if task.size != TaskSize::L {
-        anyhow::bail!("Task {} is size {}, not L. Only L tasks can be split.", task_id, task.size);
+        anyhow::bail!(
+            "Task {} is size {}, not L. Only L tasks can be split.",
+            task_id,
+            task.size
+        );
     }
 
     writeln!(writer, "\n{}", "=== specr split ===".bold().cyan())?;
-    writeln!(writer, "Splitting task {} \u{00b7} {}\n", task.id.bold(), task.name)?;
+    writeln!(
+        writer,
+        "Splitting task {} \u{00b7} {}\n",
+        task.id.bold(),
+        task.name
+    )?;
     writeln!(writer, "Current scope: {}\n", task.scope)?;
 
     // Call LLM to suggest subtasks
-    writeln!(writer, "{}", "Generating subtask suggestions via LLM...".cyan())?;
+    writeln!(
+        writer,
+        "{}",
+        "Generating subtask suggestions via LLM...".cyan()
+    )?;
 
     let prompt = format!(
         "Split this task into smaller subtasks:\n\nID: {}\nName: {}\nScope: {}\nDone when: {}\nDepends on: {}\n\nFiles to touch: {}\n\nGenerate subtask IDs as {}a, {}b, {}c, etc.",
@@ -288,11 +339,15 @@ pub async fn split_with_io<R: BufRead, W: Write>(
 
     let llm_response = client.complete(SPLIT_SYSTEM, &prompt).await?;
     let raw_json = extract_json(&llm_response);
-    let subtasks: Vec<Task> = parse_task_json(&raw_json)
-        .context("Failed to parse LLM split response")?;
+    let subtasks: Vec<Task> =
+        parse_task_json(&raw_json).context("Failed to parse LLM split response")?;
 
     // Show subtasks
-    writeln!(writer, "\n{}\n", "--- Suggested Subtasks ---".bold().green())?;
+    writeln!(
+        writer,
+        "\n{}\n",
+        "--- Suggested Subtasks ---".bold().green()
+    )?;
     for st in &subtasks {
         writeln!(
             writer,
@@ -332,7 +387,11 @@ pub async fn split_with_io<R: BufRead, W: Write>(
             }
         }
 
-        writeln!(writer, "\n{}", "Task split successfully. TASKS.md updated.".green())?;
+        writeln!(
+            writer,
+            "\n{}",
+            "Task split successfully. TASKS.md updated.".green()
+        )?;
     } else {
         writeln!(writer, "{}", "Split cancelled.".yellow())?;
     }

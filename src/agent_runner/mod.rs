@@ -33,11 +33,7 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
             .with_context(|| format!("Task {} not found", id))?;
 
         if task.status != TaskStatus::Open {
-            anyhow::bail!(
-                "Task {} has status '{}', expected 'open'",
-                id,
-                task.status
-            );
+            anyhow::bail!("Task {} has status '{}', expected 'open'", id, task.status);
         }
 
         vec![task]
@@ -50,11 +46,7 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
         eligible
     };
 
-    println!(
-        "\n{} {} task(s) to run\n",
-        "→".bold(),
-        eligible.len()
-    );
+    println!("\n{} {} task(s) to run\n", "→".bold(), eligible.len());
 
     for task in &eligible {
         println!(
@@ -80,12 +72,7 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
     for task in task_group {
         if let Err(e) = run_single_task(config, llm, task, &spec_content, &workdir, &notifier).await
         {
-            eprintln!(
-                "{} Task {} failed: {}",
-                "✖".bold().red(),
-                task.id.bold(),
-                e
-            );
+            eprintln!("{} Task {} failed: {}", "✖".bold().red(), task.id.bold(), e);
             store::update_task_status(&workdir, &task.id, TaskStatus::Failed)?;
             notifier
                 .send(&format!("❌ Task {} failed: {}", task.id, e))
@@ -121,11 +108,7 @@ async fn run_single_task(
 
     // b. Create git branch
     let branch = &task.branch;
-    println!(
-        "{} Creating branch: {}",
-        "⎇".bold(),
-        branch.cyan()
-    );
+    println!("{} Creating branch: {}", "⎇".bold(), branch.cyan());
     git_command(workdir, &["checkout", "-b", branch]).await?;
 
     // c. Notify Telegram
@@ -141,12 +124,7 @@ async fn run_single_task(
     loop {
         // Check iteration limit
         if let Err(e) = loop_ctrl.increment() {
-            eprintln!(
-                "{} {} — preserving branch {}",
-                "✖".bold().red(),
-                e,
-                branch
-            );
+            eprintln!("{} {} — preserving branch {}", "✖".bold().red(), e, branch);
             store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
             notifier
                 .send(&format!(
@@ -169,7 +147,13 @@ async fn run_single_task(
         // d. Spawn coding agent
         println!("{} Running coding agent...", "⚙".bold());
         agent
-            .run(task, spec_content, &task_detail, workdir, retry_findings.as_deref())
+            .run(
+                task,
+                spec_content,
+                &task_detail,
+                workdir,
+                retry_findings.as_deref(),
+            )
             .await?;
 
         // e. Get git diff
@@ -202,10 +186,7 @@ async fn run_single_task(
             store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
 
             notifier
-                .send(&format!(
-                    "✅ Task {} completed: {}",
-                    task.id, task.name
-                ))
+                .send(&format!("✅ Task {} completed: {}", task.id, task.name))
                 .await
                 .ok();
 
@@ -250,12 +231,18 @@ fn print_review_summary(result: &review::ReviewResult) {
 fn print_no_eligible_reason(tasks: &[Task]) {
     println!("{} No eligible tasks to run.\n", "ℹ".bold().blue());
 
-    let open = tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
+    let open = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Open)
+        .count();
     let in_progress = tasks
         .iter()
         .filter(|t| t.status == TaskStatus::InProgress)
         .count();
-    let done = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+    let done = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
     let failed = tasks
         .iter()
         .filter(|t| t.status == TaskStatus::Failed)
@@ -265,7 +252,10 @@ fn print_no_eligible_reason(tasks: &[Task]) {
         .filter(|t| t.status == TaskStatus::Open && t.size == crate::types::TaskSize::L)
         .count();
 
-    println!("  Open: {}  In-progress: {}  Done: {}  Failed: {}", open, in_progress, done, failed);
+    println!(
+        "  Open: {}  In-progress: {}  Done: {}  Failed: {}",
+        open, in_progress, done, failed
+    );
 
     if large > 0 {
         println!(

@@ -124,7 +124,8 @@ mod tests {
 
     #[test]
     fn test_format_api_error_with_json() {
-        let body = r#"{"error": {"message": "Incorrect API key", "type": "invalid_request_error"}}"#;
+        let body =
+            r#"{"error": {"message": "Incorrect API key", "type": "invalid_request_error"}}"#;
         let result = format_api_error(reqwest::StatusCode::UNAUTHORIZED, body);
         assert!(result.contains("Incorrect API key"));
         assert!(result.contains("401"));

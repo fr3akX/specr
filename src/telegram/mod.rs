@@ -121,7 +121,10 @@ fn format_task_status(tasks: &[crate::types::Task]) -> String {
         ));
     }
 
-    let done = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+    let done = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
     out.push_str(&format!("\nProgress: {}/{}", done, tasks.len()));
 
     out

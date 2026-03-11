@@ -59,11 +59,7 @@ impl LoopController {
         prompt
     }
 
-    fn append_findings(
-        prompt: &mut String,
-        label: &str,
-        finding: &crate::types::Finding,
-    ) {
+    fn append_findings(prompt: &mut String, label: &str, finding: &crate::types::Finding) {
         prompt.push_str(&format!("## {} ({})\n", label, finding.verdict));
 
         if !finding.critical.is_empty() {
@@ -245,10 +241,7 @@ mod tests {
 
     #[test]
     fn test_loop_limit_error_display() {
-        let err = LoopLimitError {
-            current: 6,
-            max: 5,
-        };
+        let err = LoopLimitError { current: 6, max: 5 };
         assert_eq!(err.to_string(), "Loop limit exceeded: 6 > 5");
     }
 }

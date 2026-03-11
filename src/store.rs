@@ -67,17 +67,18 @@ pub fn extract_project_name(content: &str) -> String {
 /// Read TASKS.md from the given directory, parsing it into tasks and spec-version.
 pub fn read_tasks(dir: &Path) -> Result<(Vec<Task>, u32)> {
     let path = dir.join(TASKS_FILENAME);
-    let content = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "No TASKS.md found in {}. Run: specr tasks",
-            dir.display()
-        )
-    })?;
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("No TASKS.md found in {}. Run: specr tasks", dir.display()))?;
     renderer::parse_tasks_md(&content)
 }
 
 /// Write TASKS.md to the given directory.
-pub fn write_tasks(dir: &Path, tasks: &[Task], spec_version: u32, project_name: &str) -> Result<()> {
+pub fn write_tasks(
+    dir: &Path,
+    tasks: &[Task],
+    spec_version: u32,
+    project_name: &str,
+) -> Result<()> {
     let content = renderer::render_tasks_md(tasks, spec_version, project_name);
     let path = dir.join(TASKS_FILENAME);
     std::fs::write(&path, content)
@@ -318,7 +319,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = read_tasks(tmp.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No TASKS.md found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No TASKS.md found"));
     }
 
     #[test]
@@ -360,21 +364,19 @@ mod tests {
         // Write a SPEC.md so extract_project_name works
         write_spec(tmp.path(), "# Project: Test\n\nContent", &test_config()).unwrap();
 
-        let tasks = vec![
-            crate::types::Task {
-                id: "001".to_string(),
-                name: "Scaffold".to_string(),
-                size: crate::types::TaskSize::S,
-                status: crate::types::TaskStatus::Open,
-                depends_on: vec![],
-                done_when: "cargo build passes".to_string(),
-                scope: "Create project".to_string(),
-                files_to_touch: vec![],
-                not_to_change: vec![],
-                branch: "task/001-scaffold".to_string(),
-                interface: None,
-            },
-        ];
+        let tasks = vec![crate::types::Task {
+            id: "001".to_string(),
+            name: "Scaffold".to_string(),
+            size: crate::types::TaskSize::S,
+            status: crate::types::TaskStatus::Open,
+            depends_on: vec![],
+            done_when: "cargo build passes".to_string(),
+            scope: "Create project".to_string(),
+            files_to_touch: vec![],
+            not_to_change: vec![],
+            branch: "task/001-scaffold".to_string(),
+            interface: None,
+        }];
 
         write_tasks(tmp.path(), &tasks, 1, "Test").unwrap();
         update_task_status(tmp.path(), "001", TaskStatus::InProgress).unwrap();
@@ -388,21 +390,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_spec(tmp.path(), "# Project: Test\n\nContent", &test_config()).unwrap();
 
-        let tasks = vec![
-            crate::types::Task {
-                id: "001".to_string(),
-                name: "Scaffold".to_string(),
-                size: crate::types::TaskSize::S,
-                status: crate::types::TaskStatus::Open,
-                depends_on: vec![],
-                done_when: "tests pass".to_string(),
-                scope: "scope".to_string(),
-                files_to_touch: vec![],
-                not_to_change: vec![],
-                branch: "task/001-scaffold".to_string(),
-                interface: None,
-            },
-        ];
+        let tasks = vec![crate::types::Task {
+            id: "001".to_string(),
+            name: "Scaffold".to_string(),
+            size: crate::types::TaskSize::S,
+            status: crate::types::TaskStatus::Open,
+            depends_on: vec![],
+            done_when: "tests pass".to_string(),
+            scope: "scope".to_string(),
+            files_to_touch: vec![],
+            not_to_change: vec![],
+            branch: "task/001-scaffold".to_string(),
+            interface: None,
+        }];
 
         write_tasks(tmp.path(), &tasks, 1, "Test").unwrap();
         let result = update_task_status(tmp.path(), "999", TaskStatus::Done);

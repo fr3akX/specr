@@ -41,11 +41,7 @@ updated: {date}
 "#;
 
 /// Build the user prompt for the LLM: initial idea + Q&A pairs + template.
-pub fn build_user_prompt(
-    idea: &str,
-    qa_pairs: &[(String, Option<String>)],
-    today: &str,
-) -> String {
+pub fn build_user_prompt(idea: &str, qa_pairs: &[(String, Option<String>)], today: &str) -> String {
     let mut prompt = format!("## Project Idea\n{}\n\n## Clarifying Q&A\n", idea);
 
     for (question, answer) in qa_pairs {
@@ -60,8 +56,7 @@ pub fn build_user_prompt(
     prompt.push_str("## Output Template\nFill in this template. Replace all {placeholders} with concrete content. Output ONLY the filled-in markdown.\n\n");
 
     // Include the template with today's date filled in
-    let template = SPEC_TEMPLATE
-        .replace("{date}", today);
+    let template = SPEC_TEMPLATE.replace("{date}", today);
     prompt.push_str(&template);
 
     prompt
@@ -145,7 +140,10 @@ mod tests {
     #[test]
     fn test_build_user_prompt_basic() {
         let qa = vec![
-            ("What does this do?".to_string(), Some("A todo app".to_string())),
+            (
+                "What does this do?".to_string(),
+                Some("A todo app".to_string()),
+            ),
             ("Out of scope?".to_string(), None),
         ];
         let prompt = build_user_prompt("Build a todo app", &qa, "2024-01-15");
@@ -157,9 +155,7 @@ mod tests {
 
     #[test]
     fn test_build_user_prompt_empty_answer_treated_as_unanswered() {
-        let qa = vec![
-            ("Q1?".to_string(), Some("  ".to_string())),
-        ];
+        let qa = vec![("Q1?".to_string(), Some("  ".to_string()))];
         let prompt = build_user_prompt("idea", &qa, "2024-01-01");
         assert!(prompt.contains("(unanswered)"));
     }
