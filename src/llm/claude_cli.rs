@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tokio::process::Command;
+use std::process::Stdio;
+use tokio::{io::AsyncWriteExt, process::Command};
 
 use super::LlmClient;
 
 /// LLM client that delegates to the `claude` CLI via subprocess.
-/// Uses `claude -p "<prompt>"` (print mode) — no API key required,
+/// Uses `claude -p` (print mode) with stdin for the user prompt — no API key required,
 /// uses the Claude Code subscription already configured on the system.
 pub struct ClaudeCliClient {
     /// Path or name of the claude binary (from config.agent.runner_bin)
@@ -23,29 +24,45 @@ impl ClaudeCliClient {
 #[async_trait]
 impl LlmClient for ClaudeCliClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        // Combine system and user prompts into a single prompt for the CLI.
-        // claude -p accepts a single prompt string; we prepend the system prompt
-        // as a clearly delimited block so the model sees full context.
-        let combined = format!(
-            "<system>\n{system}\n</system>\n\n{user}",
-            system = system,
-            user = user
-        );
-
         let mut cmd = Command::new(&self.bin);
-        cmd.arg("--print").arg(&combined);
+
+        // -p / --print: non-interactive, exits after response
+        cmd.arg("-p");
+
+        // Pass system prompt via dedicated flag (keeps it separate from user content)
+        if !system.is_empty() {
+            cmd.arg("--system-prompt").arg(system);
+        }
 
         if let Some(ref model) = self.model {
             cmd.arg("--model").arg(model);
         }
 
-        // Suppress interactive UI — we only want stdout
+        // Pass user prompt via stdin — safer than a CLI argument for long prompts
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        // Suppress interactive UI elements
         cmd.env("NO_COLOR", "1");
 
-        let output = cmd
-            .output()
-            .await
+        let mut child = cmd
+            .spawn()
             .with_context(|| format!("Failed to spawn claude CLI at '{}'", self.bin))?;
+
+        // Write user prompt to stdin then close it (EOF signals end of input)
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(user.as_bytes())
+                .await
+                .context("Failed to write prompt to claude CLI stdin")?;
+            // Drop closes stdin
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("Failed to wait for claude CLI to complete")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
