@@ -50,6 +50,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+        env:
+          DEBIAN_FRONTEND: noninteractive
 
       - name: Configure cross-linker (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
