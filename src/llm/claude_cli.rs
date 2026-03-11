@@ -51,6 +51,11 @@ impl LlmClient for ClaudeCliClient {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
+        // Run from /tmp so claude does not scan the caller's project directory.
+        // In -p mode, claude still indexes the cwd as workspace context — this
+        // prevents it from spending time (or hanging) on large directory trees.
+        cmd.current_dir(std::env::temp_dir());
+
         // Prompt as positional argument.
         cmd.arg(user);
 
