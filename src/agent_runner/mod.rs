@@ -18,6 +18,35 @@ use loop_controller::LoopController;
 use resolver::Resolver;
 use review::run_reviews;
 
+/// Detect the default branch name ("main", "master", or whatever HEAD points to).
+async fn detect_default_branch(workdir: &Path) -> String {
+    // Try: git symbolic-ref refs/remotes/origin/HEAD -> refs/remotes/origin/main
+    if let Ok(out) = git_command(
+        workdir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
+        let branch = out.trim().trim_start_matches("origin/").to_string();
+        if !branch.is_empty() {
+            return branch;
+        }
+    }
+
+    // Fallback: check which of main/master exists locally
+    for candidate in &["main", "master"] {
+        if git_command(workdir, &["rev-parse", "--verify", candidate])
+            .await
+            .is_ok()
+        {
+            return candidate.to_string();
+        }
+    }
+
+    // Last resort: use config value or hard default
+    "main".to_string()
+}
+
 /// Run the agent pipeline for eligible (or specified) tasks.
 pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) -> Result<()> {
     let workdir = std::env::current_dir()?;
@@ -25,6 +54,12 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
     let spec_content = store::read_spec(&workdir)?;
 
     let notifier = TelegramNotifier::from_config(config);
+    let default_branch = detect_default_branch(&workdir).await;
+    println!(
+        "{} Default branch: {}",
+        "⎇".dimmed(),
+        default_branch.dimmed()
+    );
 
     let eligible: Vec<&Task> = if let Some(id) = task_id {
         let task = tasks
@@ -70,7 +105,16 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
     };
 
     for task in task_group {
-        if let Err(e) = run_single_task(config, llm, task, &spec_content, &workdir, &notifier).await
+        if let Err(e) = run_single_task(
+            config,
+            llm,
+            task,
+            &spec_content,
+            &workdir,
+            &notifier,
+            &default_branch,
+        )
+        .await
         {
             eprintln!("{} Task {} failed: {}", "✖".bold().red(), task.id.bold(), e);
             store::update_task_status(&workdir, &task.id, TaskStatus::Failed)?;
@@ -79,8 +123,10 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
                 .await
                 .ok();
 
-            // Return to main branch on failure
-            git_command(&workdir, &["checkout", "main"]).await.ok();
+            // Return to default branch on failure
+            git_command(&workdir, &["checkout", &default_branch])
+                .await
+                .ok();
         }
     }
 
@@ -95,6 +141,7 @@ async fn run_single_task(
     spec_content: &str,
     workdir: &Path,
     notifier: &TelegramNotifier,
+    default_branch: &str,
 ) -> Result<()> {
     let task_detail = store::read_task_detail(workdir, &task.id).unwrap_or_else(|_| {
         format!(
@@ -133,7 +180,9 @@ async fn run_single_task(
                 ))
                 .await
                 .ok();
-            git_command(workdir, &["checkout", "main"]).await.ok();
+            git_command(workdir, &["checkout", default_branch])
+                .await
+                .ok();
             return Ok(());
         }
 
@@ -157,7 +206,7 @@ async fn run_single_task(
             .await?;
 
         // e. Get git diff
-        let diff = git_command(workdir, &["diff", "main..HEAD"]).await?;
+        let diff = git_command(workdir, &["diff", &format!("{}..HEAD", default_branch)]).await?;
         if diff.is_empty() {
             println!(
                 "{} No changes produced by coding agent",
@@ -178,7 +227,7 @@ async fn run_single_task(
             println!("{} All reviews passed!", "✔".bold().green());
 
             // Merge branch
-            git_command(workdir, &["checkout", "main"]).await?;
+            git_command(workdir, &["checkout", default_branch]).await?;
             git_command(workdir, &["merge", branch]).await?;
             git_command(workdir, &["branch", "-d", branch]).await?;
 

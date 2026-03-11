@@ -75,7 +75,9 @@ impl CodingAgent {
     /// Spawn the CLI binary with a prompt, streaming output.
     async fn spawn_with_prompt(&self, prompt: &str, workdir: &Path) -> Result<()> {
         let mut child = Command::new(&self.bin)
-            .arg("--print")
+            .arg("-p")
+            .arg("--dangerously-skip-permissions")
+            .arg("--no-session-persistence")
             .arg(prompt)
             .current_dir(workdir)
             .stdout(std::process::Stdio::piped())
