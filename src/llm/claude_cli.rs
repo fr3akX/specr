@@ -40,6 +40,9 @@ impl LlmClient for ClaudeCliClient {
         // Prevent any session I/O blocking.
         cmd.arg("--no-session-persistence");
 
+        // Allow file access without permission prompts.
+        cmd.arg("--dangerously-skip-permissions");
+
         if let Some(ref model) = self.model {
             cmd.arg("--model").arg(model);
         }
