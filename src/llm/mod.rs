@@ -50,7 +50,12 @@ mod tests {
     fn make_config(provider: &str) -> Config {
         let mut config = Config::default();
         config.llm.provider = provider.to_string();
-        config.llm.model = "test-model".to_string();
+        config.llm.model = if provider == "claude-cli" {
+            ""
+        } else {
+            "test-model"
+        }
+        .to_string();
         config.llm.api_key_env = "TEST_KEY".to_string();
         config
     }

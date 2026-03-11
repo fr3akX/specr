@@ -78,9 +78,9 @@ Config file: `~/.config/specr/config.toml` (auto-created with defaults on first 
 
 ```toml
 [llm]
-provider = "anthropic"           # anthropic | openai
-model = "claude-sonnet-4-6"
-api_key_env = "ANTHROPIC_API_KEY"  # env var name — never the value
+provider = "claude-cli"          # claude-cli | anthropic | openai
+model = ""                       # optional model override (empty = CLI default)
+api_key_env = "ANTHROPIC_API_KEY"  # only needed for anthropic/openai providers
 
 [output]
 base_dir = "."                   # where SPEC.md / TASKS.md are written

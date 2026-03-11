@@ -78,8 +78,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             llm: LlmConfig {
-                provider: "anthropic".to_string(),
-                model: "claude-sonnet-4-6".to_string(),
+                provider: "claude-cli".to_string(),
+                model: "".to_string(),
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
             },
             output: OutputConfig {
@@ -158,8 +158,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.llm.provider, "anthropic");
-        assert_eq!(config.llm.model, "claude-sonnet-4-6");
+        assert_eq!(config.llm.provider, "claude-cli");
+        assert_eq!(config.llm.model, "");
         assert_eq!(config.llm.api_key_env, "ANTHROPIC_API_KEY");
         assert_eq!(config.output.base_dir, ".");
         assert!(config.output.obsidian_dir.is_empty());
@@ -182,7 +182,7 @@ mod tests {
 
         let config = load_config_from(&path).unwrap();
         assert!(path.exists());
-        assert_eq!(config.llm.provider, "anthropic");
+        assert_eq!(config.llm.provider, "claude-cli");
     }
 
     #[test]
@@ -219,7 +219,7 @@ question_budget = 5
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("a").join("b").join("config.toml");
         let config = load_config_from(&path).unwrap();
-        assert_eq!(config.llm.provider, "anthropic");
+        assert_eq!(config.llm.provider, "claude-cli");
         assert!(path.exists());
     }
 
