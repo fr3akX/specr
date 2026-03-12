@@ -20,9 +20,12 @@ pub struct LlmConfig {
     /// Model name or alias. For `claude-cli`, this maps to `claude --model <model>`.
     pub model: String,
     pub api_key_env: String,
-    /// Timeout (seconds) for an LLM completion request.
+    /// Timeout (seconds) for the coding agent subprocess (claude CLI).
     #[serde(default = "default_llm_timeout_seconds")]
     pub timeout_seconds: u64,
+    /// Timeout (seconds) for each review LLM call. Defaults to 120s.
+    #[serde(default = "default_review_timeout_seconds")]
+    pub review_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +47,10 @@ fn default_max_loop_iterations() -> u32 {
 
 fn default_llm_timeout_seconds() -> u64 {
     300
+}
+
+fn default_review_timeout_seconds() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,10 +94,10 @@ impl Default for Config {
         Config {
             llm: LlmConfig {
                 provider: "claude-cli".to_string(),
-                // Prefer a fast, widely-available default. Users can override.
                 model: "sonnet".to_string(),
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
                 timeout_seconds: default_llm_timeout_seconds(),
+                review_timeout_seconds: default_review_timeout_seconds(),
             },
             output: OutputConfig {
                 base_dir: ".".to_string(),

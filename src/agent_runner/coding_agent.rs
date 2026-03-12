@@ -78,7 +78,7 @@ impl CodingAgent {
         self.spawn_with_prompt(&prompt, workdir).await
     }
 
-    /// Spawn the CLI binary with a prompt, streaming output.
+    /// Spawn the CLI binary with a prompt, streaming stdout and stderr concurrently.
     async fn spawn_with_prompt(&self, prompt: &str, workdir: &Path) -> Result<()> {
         let mut child = Command::new(&self.bin)
             .arg("-p")
@@ -91,25 +91,37 @@ impl CodingAgent {
             .spawn()
             .with_context(|| format!("Failed to spawn {}", self.bin))?;
 
-        // Stream stdout
-        if let Some(stdout) = child.stdout.take() {
+        // Stream stdout and stderr concurrently to avoid deadlock when both
+        // buffers fill up. Reading them sequentially can cause the subprocess
+        // to block writing to the full buffer while we're still draining the other.
+        let stdout_task = if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Some(line) = lines.next_line().await? {
-                println!("{}", line);
-            }
-        }
+            tokio::spawn(async move {
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("{}", line);
+                }
+            })
+        } else {
+            tokio::spawn(async {})
+        };
 
-        // Stream stderr
-        if let Some(stderr) = child.stderr.take() {
+        let stderr_task = if let Some(stderr) = child.stderr.take() {
             let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Some(line) = lines.next_line().await? {
-                eprintln!("{}", line);
-            }
-        }
+            tokio::spawn(async move {
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("{}", line);
+                }
+            })
+        } else {
+            tokio::spawn(async {})
+        };
 
         let status = child.wait().await?;
+        // Wait for both stream tasks to flush before returning
+        let _ = tokio::join!(stdout_task, stderr_task);
+
         if !status.success() {
             anyhow::bail!(
                 "{} exited with status {}",

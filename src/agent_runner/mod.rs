@@ -436,8 +436,23 @@ async fn run_single_task(
         };
 
         // f. Run 3 parallel reviews
+        // Filter TASKS.md out of the diff — it's specr state, not implementation,
+        // and its presence confuses reviewers (they see "done"/"failed" changes, not code).
+        let review_diff = filter_diff_paths(&diff, &["TASKS.md"]);
+
         println!("{} Running reviews...", "🔍".bold());
-        let review_result = run_reviews(llm, spec_content, &task_detail, &diff).await?;
+        let review_timeout = std::time::Duration::from_secs(config.llm.review_timeout_seconds);
+        let review_result = tokio::time::timeout(
+            review_timeout,
+            run_reviews(llm, spec_content, &task_detail, &review_diff),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Reviews timed out after {}s (adjust llm.review_timeout_seconds)",
+                config.llm.review_timeout_seconds
+            )
+        })??;
 
         // Print review summary
         print_review_summary(&review_result);
@@ -486,6 +501,25 @@ async fn run_single_task(
         );
         retry_findings = Some(findings);
     }
+}
+
+/// Remove diff hunks for specified file paths from a unified diff string.
+/// Strips everything from `diff --git a/<path>` to the next `diff --git` header.
+fn filter_diff_paths<'a>(diff: &'a str, exclude: &[&str]) -> String {
+    let mut result = String::with_capacity(diff.len());
+    let mut skip = false;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            skip = exclude.iter().any(|p| line.contains(p));
+        }
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result
 }
 
 fn print_review_summary(result: &review::ReviewResult) {
