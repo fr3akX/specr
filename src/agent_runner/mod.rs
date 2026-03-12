@@ -493,12 +493,21 @@ async fn run_single_task(
             return Ok(());
         }
 
-        // Has critical findings — loop with feedback
+        // Has critical findings — print them and loop with feedback
         let findings = LoopController::findings_prompt(&review_result);
-        println!(
-            "{} Critical findings detected, retrying...",
-            "↻".bold().yellow()
-        );
+        println!("{} Critical findings:\n", "↻".bold().yellow());
+        for line in findings.lines() {
+            if line.starts_with("## ") {
+                println!("  {}", line[3..].bold());
+            } else if line.starts_with("### ") {
+                println!("  {}", line[4..].yellow());
+            } else if line.starts_with("- ") {
+                println!("    {}", line);
+            } else if !line.is_empty() {
+                println!("  {}", line);
+            }
+        }
+        println!("\n{} Retrying...", "↻".bold().yellow());
         retry_findings = Some(findings);
     }
 }
