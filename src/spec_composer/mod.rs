@@ -49,12 +49,13 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
     writeln!(writer, "Idea: {}\n", idea.bold())?;
     writeln!(
         writer,
-        "I'll ask up to {} clarifying questions. Press Enter to skip any.\n",
-        config.spec.question_budget
+        "I'll ask tailored clarifying questions. Press Enter to skip any.\n"
     )?;
 
-    // Step 2: Q&A
-    let question_list = questions::get_questions(config.spec.question_budget);
+    // Step 2: Generate questions from LLM
+    writeln!(writer, "{}", "Generating questions...".dimmed())?;
+    writer.flush()?;
+    let question_list = questions::generate(idea, config.spec.question_budget, client).await;
     let mut qa_pairs: Vec<(String, Option<String>)> = Vec::new();
 
     for (i, question) in question_list.iter().enumerate() {
@@ -287,15 +288,23 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
 
-    /// A mock LLM client that returns a fixed response.
+    /// A mock LLM client.
+    /// First call returns questions JSON, subsequent calls return the spec draft.
     struct MockLlmClient {
-        response: String,
+        questions_response: String,
+        spec_response: String,
+        call_count: std::sync::atomic::AtomicUsize,
     }
 
     impl MockLlmClient {
+        /// Simple mock: always returns the same response for any call.
         fn new(response: &str) -> Self {
             Self {
-                response: response.to_string(),
+                // Return a simple 2-question list for question generation
+                questions_response: r#"["What does this project do?", "What is out of scope?"]"#
+                    .to_string(),
+                spec_response: response.to_string(),
+                call_count: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
@@ -303,7 +312,16 @@ mod tests {
     #[async_trait]
     impl LlmClient for MockLlmClient {
         async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
-            Ok(self.response.clone())
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // First call: question generation
+                Ok(self.questions_response.clone())
+            } else {
+                // Subsequent calls: spec draft or consistency check
+                Ok(self.spec_response.clone())
+            }
         }
     }
 
@@ -323,7 +341,7 @@ mod tests {
         let mock_spec = "---\nspec-version: 1\n---\n\n# Project: Test\n\n## Goal\nTest goal\n";
         let client = MockLlmClient::new(mock_spec);
 
-        // Simulate: answer q1, skip q2, then approve
+        // Mock returns 2 questions; answer q1, skip q2, then approve
         let input = "A todo app\n\ny\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
@@ -350,6 +368,7 @@ mod tests {
         let config = test_config();
         let client = MockLlmClient::new("draft content");
 
+        // Mock returns 2 questions; provide 2 answers then abort
         let input = "answer1\nanswer2\nno\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
@@ -376,7 +395,7 @@ mod tests {
         let config = test_config();
         let client = MockLlmClient::new("draft");
 
-        // Skip both questions, then approve
+        // Mock returns 2 questions; skip both, then approve
         let input = "\n\ny\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
@@ -462,9 +481,19 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("No SPEC.md found"));
     }
 
+    /// A simple mock that always returns the same response regardless of call count.
+    struct AlwaysMock(String);
+
+    #[async_trait]
+    impl LlmClient for AlwaysMock {
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
     #[tokio::test]
     async fn test_check_consistency_ok() {
-        let client = MockLlmClient::new("OK");
+        let client = AlwaysMock("OK".to_string());
         let result = check_consistency(&client, "spec content").await.unwrap();
         assert!(result.is_none());
     }
@@ -472,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_consistency_with_issues() {
         let client =
-            MockLlmClient::new("The stack section mentions Python but the goal says Rust.");
+            AlwaysMock("The stack section mentions Python but the goal says Rust.".to_string());
         let result = check_consistency(&client, "spec content").await.unwrap();
         assert!(result.is_some());
         assert!(result.unwrap().contains("Python"));
