@@ -179,6 +179,7 @@ mod tests {
         assert_eq!(config.llm.model, "sonnet");
         assert_eq!(config.llm.api_key_env, "ANTHROPIC_API_KEY");
         assert_eq!(config.llm.timeout_seconds, 300);
+        assert_eq!(config.llm.review_timeout_seconds, 120);
         assert_eq!(config.output.base_dir, ".");
         assert!(config.output.obsidian_dir.is_empty());
         assert_eq!(config.spec.question_budget, 8);

@@ -224,7 +224,10 @@ async fn run_all_tasks(
     }
 }
 
-/// Run a group of tasks concurrently; returns true if any task failed.
+/// Run a group of tasks sequentially; returns true if any task failed.
+/// Tasks in the same group are logically parallel (no shared file deps),
+/// but are run one at a time because each needs an exclusive git checkout.
+/// True parallelism would require git worktrees — not yet implemented.
 async fn run_task_group_checked(
     config: &Config,
     llm: &dyn LlmClient,
@@ -497,10 +500,10 @@ async fn run_single_task(
         let findings = LoopController::findings_prompt(&review_result);
         println!("{} Critical findings:\n", "↻".bold().yellow());
         for line in findings.lines() {
-            if line.starts_with("## ") {
-                println!("  {}", line[3..].bold());
-            } else if line.starts_with("### ") {
-                println!("  {}", line[4..].yellow());
+            if let Some(rest) = line.strip_prefix("## ") {
+                println!("  {}", rest.bold());
+            } else if let Some(rest) = line.strip_prefix("### ") {
+                println!("  {}", rest.yellow());
             } else if line.starts_with("- ") {
                 println!("    {}", line);
             } else if !line.is_empty() {
@@ -514,7 +517,7 @@ async fn run_single_task(
 
 /// Remove diff hunks for specified file paths from a unified diff string.
 /// Strips everything from `diff --git a/<path>` to the next `diff --git` header.
-fn filter_diff_paths<'a>(diff: &'a str, exclude: &[&str]) -> String {
+fn filter_diff_paths(diff: &str, exclude: &[&str]) -> String {
     let mut result = String::with_capacity(diff.len());
     let mut skip = false;
 
@@ -605,5 +608,68 @@ fn print_no_eligible_reason(tasks: &[Task]) {
         for t in &blocked {
             println!("    Task {} depends on: {}", t.id, t.depends_on.join(", "));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_diff_paths_removes_tasks_md() {
+        let diff = "\
+diff --git a/src/lib.rs b/src/lib.rs
+index abc..def 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,3 @@
++pub fn hello() {}
+diff --git a/TASKS.md b/TASKS.md
+index 111..222 100644
+--- a/TASKS.md
++++ b/TASKS.md
+@@ -1 +1 @@
+-status = \"open\"
++status = \"done\"
+";
+        let filtered = filter_diff_paths(diff, &["TASKS.md"]);
+        assert!(filtered.contains("src/lib.rs"));
+        assert!(!filtered.contains("TASKS.md"));
+        assert!(!filtered.contains("status = \"done\""));
+    }
+
+    #[test]
+    fn test_filter_diff_paths_keeps_all_when_no_match() {
+        let diff = "\
+diff --git a/src/main.rs b/src/main.rs
+index abc..def 100644
++++ b/src/main.rs
+@@ +1 fn main() {}
+";
+        let filtered = filter_diff_paths(diff, &["TASKS.md"]);
+        assert!(filtered.contains("src/main.rs"));
+        assert_eq!(filtered.trim(), diff.trim());
+    }
+
+    #[test]
+    fn test_filter_diff_paths_empty_diff() {
+        let filtered = filter_diff_paths("", &["TASKS.md"]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_diff_paths_multiple_exclusions() {
+        let diff = "\
+diff --git a/src/lib.rs b/src/lib.rs
++pub fn x() {}
+diff --git a/TASKS.md b/TASKS.md
++status = \"done\"
+diff --git a/SPEC.md b/SPEC.md
++updated spec
+";
+        let filtered = filter_diff_paths(diff, &["TASKS.md", "SPEC.md"]);
+        assert!(filtered.contains("src/lib.rs"));
+        assert!(!filtered.contains("TASKS.md"));
+        assert!(!filtered.contains("SPEC.md"));
     }
 }
