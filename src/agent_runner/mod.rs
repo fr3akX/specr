@@ -302,12 +302,24 @@ async fn run_single_task(
         )
     });
 
-    // a. Mark as in-progress
+    // a. Mark as in-progress and commit TASKS.md to the default branch.
+    // TASKS.md tracks global state and must be committed before any branch switch,
+    // otherwise git refuses to checkout due to local modifications.
     store::update_task_status(workdir, &task.id, TaskStatus::InProgress)?;
+    git_command(workdir, &["add", "TASKS.md"]).await.ok();
+    git_command(
+        workdir,
+        &[
+            "commit",
+            "-m",
+            &format!("chore: mark task {} as in-progress", task.id),
+        ],
+    )
+    .await
+    .ok(); // ok() — no-op if nothing changed (already committed)
 
-    // b. Create git branch
+    // b. Create or resume git branch
     let branch = &task.branch;
-    // Check if the branch already exists (task was previously attempted)
     let branch_exists = git_command(workdir, &["rev-parse", "--verify", branch])
         .await
         .is_ok();
@@ -337,15 +349,26 @@ async fn run_single_task(
         // Check iteration limit
         if let Err(e) = loop_ctrl.increment() {
             eprintln!("{} {} — preserving branch {}", "✖".bold().red(), e, branch);
+            git_command(workdir, &["checkout", default_branch])
+                .await
+                .ok();
             store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
+            git_command(workdir, &["add", "TASKS.md"]).await.ok();
+            git_command(
+                workdir,
+                &[
+                    "commit",
+                    "-m",
+                    &format!("chore: mark task {} as failed", task.id),
+                ],
+            )
+            .await
+            .ok();
             notifier
                 .send(&format!(
                     "❌ Task {} failed after {} iterations (limit: {})",
                     task.id, e.current, e.max
                 ))
-                .await
-                .ok();
-            git_command(workdir, &["checkout", default_branch])
                 .await
                 .ok();
             return Ok(());
@@ -423,13 +446,24 @@ async fn run_single_task(
         if LoopController::all_passed(&review_result) {
             println!("{} All reviews passed!", "✔".bold().green());
 
-            // Merge branch
+            // Merge branch back to default
             git_command(workdir, &["checkout", default_branch]).await?;
             git_command(workdir, &["merge", branch]).await?;
             git_command(workdir, &["branch", "-d", branch]).await?;
 
-            // Mark done
+            // Mark done and commit TASKS.md so it's clean for the next checkout
             store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
+            git_command(workdir, &["add", "TASKS.md"]).await.ok();
+            git_command(
+                workdir,
+                &[
+                    "commit",
+                    "-m",
+                    &format!("chore: mark task {} as done", task.id),
+                ],
+            )
+            .await
+            .ok();
 
             notifier
                 .send(&format!("✅ Task {} completed: {}", task.id, task.name))
