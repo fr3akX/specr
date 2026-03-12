@@ -63,6 +63,7 @@ pub fn build_user_prompt(idea: &str, qa_pairs: &[(String, Option<String>)], toda
 }
 
 /// Known section headings in SPEC.md for the "edit <section>" flow.
+#[allow(dead_code)]
 pub const SECTION_HEADINGS: &[&str] = &[
     "Goal",
     "Scope",
@@ -77,6 +78,7 @@ pub const SECTION_HEADINGS: &[&str] = &[
 
 /// Replace the content of a named section in the spec.
 /// A section starts with "## <heading>" and ends before the next "## " or end of file.
+#[allow(dead_code)]
 pub fn replace_section(spec: &str, section_name: &str, new_content: &str) -> String {
     let target = format!("## {}", section_name);
     let mut result = String::with_capacity(spec.len());

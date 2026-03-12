@@ -6,7 +6,7 @@ use std::io::BufRead;
 use std::io::{self, Write};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use rustyline::DefaultEditor;
 
@@ -171,62 +171,116 @@ async fn compose_with_input<L: LineInput, W: Write>(
         writeln!(writer, "{}\n", "--- END DRAFT ---".bold().green())?;
 
         // Step 5: Ask for approval
-        writeln!(writer, "{}", "Approve? (yes / edit <section> / no)".bold())?;
+        writeln!(
+            writer,
+            "{}",
+            "Approve? [y]es / [e]dit in $EDITOR / [n]o".bold()
+        )?;
 
         let approval_raw = input.readline("> ")?.to_lowercase();
-        let approval = approval_raw.as_str();
+        let approval = approval_raw.trim();
 
         if approval == "yes" || approval == "y" || approval == "approve" || approval == "ok" {
-            // Step 6: Write file
             store::write_spec(output_dir, &draft, config)?;
             let spec_path = output_dir.join("SPEC.md");
             writeln!(
                 writer,
                 "\n{} {}",
-                "SPEC.md written to".green(),
+                "✔ SPEC.md written to".green(),
                 spec_path.display().to_string().bold()
             )?;
             return Ok(());
         } else if approval == "no" || approval == "n" {
             writeln!(writer, "{}", "Aborted. No file written.".yellow())?;
             return Ok(());
-        } else if let Some(section) = approval.strip_prefix("edit ") {
-            let section = section.trim();
-            // Validate section name
-            let matched = renderer::SECTION_HEADINGS
-                .iter()
-                .find(|h| h.eq_ignore_ascii_case(section));
-
-            if let Some(heading) = matched {
-                writeln!(
-                    writer,
-                    "\nEnter new content for section '{}' (empty line to finish):",
-                    heading.bold()
-                )?;
-                let mut new_content = String::new();
-                loop {
-                    let line = input.readline("")?;
-                    if line.is_empty() {
-                        break;
-                    }
-                    new_content.push_str(&line);
-                    new_content.push('\n');
+        } else if approval == "e" || approval == "edit" {
+            writeln!(writer, "{}", "Opening editor...".dimmed())?;
+            match open_in_editor(&draft).await {
+                Ok(Some(edited)) => {
+                    // User made changes — ask LLM to apply them
+                    writeln!(writer, "{}", "Applying edits...".cyan())?;
+                    draft = apply_edits(client, &draft, &edited).await?;
                 }
-                draft = renderer::replace_section(&draft, heading, &new_content);
-            } else {
-                writeln!(writer, "{}", "Unknown section. Available sections:".red())?;
-                for heading in renderer::SECTION_HEADINGS {
-                    writeln!(writer, "  - {}", heading)?;
+                Ok(None) => {
+                    // No changes made
+                    writeln!(writer, "{}", "(No changes detected)".dimmed())?;
+                }
+                Err(e) => {
+                    writeln!(writer, "{} {}", "Editor error:".red(), e)?;
                 }
             }
         } else {
             writeln!(
                 writer,
                 "{}",
-                "Please enter 'yes', 'edit <section>', or 'no'.".yellow()
+                "Enter y (approve), e (edit), or n (abort).".yellow()
             )?;
         }
     }
+}
+
+/// Open the draft in `$EDITOR` (fallback: `$VISUAL`, then `nano`).
+/// Returns `Some(edited)` if the user made changes, `None` if content is unchanged.
+async fn open_in_editor(draft: &str) -> Result<Option<String>> {
+    use std::env;
+
+    // Write draft to a temp file with .md extension for syntax highlighting
+    let temp_path = std::env::temp_dir().join(format!("specr-draft-{}.md", std::process::id()));
+    std::fs::write(&temp_path, draft)
+        .with_context(|| format!("Failed to write temp file: {}", temp_path.display()))?;
+
+    // Resolve editor binary
+    let editor = env::var("EDITOR")
+        .or_else(|_| env::var("VISUAL"))
+        .unwrap_or_else(|_| "nano".to_string());
+
+    // Open editor — must block with TTY access (use spawn_blocking)
+    let path_clone = temp_path.clone();
+    let editor_clone = editor.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&editor_clone)
+            .arg(&path_clone)
+            .status()
+    })
+    .await
+    .context("spawn_blocking failed")??;
+
+    if !status.success() {
+        anyhow::bail!("Editor '{}' exited with status {}", editor, status);
+    }
+
+    // Read back edited content
+    let edited = std::fs::read_to_string(&temp_path)
+        .with_context(|| format!("Failed to read temp file: {}", temp_path.display()))?;
+
+    // Clean up temp file (best-effort)
+    let _ = std::fs::remove_file(&temp_path);
+
+    // Detect no-change
+    if edited.trim() == draft.trim() {
+        return Ok(None);
+    }
+
+    Ok(Some(edited))
+}
+
+const EDIT_SYSTEM_PROMPT: &str = "\
+You are a senior software architect. The user has edited a SPEC.md draft with inline \
+changes and comments. Your job is to produce a revised SPEC.md that:\n\
+1. Incorporates all the user's direct edits\n\
+2. Addresses all inline comments (<!-- ... -->, // ..., or # NOTE: ... style)\n\
+3. Removes all comment markers from the final output\n\
+4. Keeps sections that were not commented on exactly as-is\n\
+Output ONLY the revised SPEC.md content, no commentary.";
+
+/// Ask the LLM to apply the user's editor changes and inline comments to the draft.
+async fn apply_edits(client: &dyn LlmClient, original: &str, edited: &str) -> Result<String> {
+    let user = format!(
+        "Original draft:\n\n{}\n\n---\n\nEdited version (with user changes/comments):\n\n{}",
+        original, edited
+    );
+    let revised = client.complete(EDIT_SYSTEM_PROMPT, &user).await?;
+    Ok(revised)
 }
 
 /// Run the refine pipeline: load existing SPEC.md, edit sections, re-approve.
@@ -263,100 +317,55 @@ async fn refine_with_input<L: LineInput, W: Write>(
 
     // Refinement loop
     loop {
-        // Step 2: Show current content
+        // Show current content
         writeln!(writer, "\n{}\n", "--- Current SPEC.md ---".bold().green())?;
         writeln!(writer, "{}", content)?;
         writeln!(writer, "{}\n", "--- END ---".bold().green())?;
 
-        // Step 3: Ask which section to edit
-        writeln!(writer, "Available sections:")?;
-        for heading in renderer::SECTION_HEADINGS {
-            writeln!(writer, "  - {}", heading)?;
-        }
         writeln!(
             writer,
-            "\n{}",
-            "Enter section to edit (or 'done' to approve / 'abort' to cancel):".bold()
+            "{}",
+            "Approve? [y]es / [e]dit in $EDITOR / [n]o".bold()
         )?;
-        let line = input.readline("> ")?;
-        let line = line.as_str();
 
-        if line.eq_ignore_ascii_case("done")
-            || line.eq_ignore_ascii_case("yes")
-            || line.eq_ignore_ascii_case("approve")
-            || line.eq_ignore_ascii_case("ok")
-        {
-            // Step 7: Bump version and write
+        let line_raw = input.readline("> ")?;
+        let line = line_raw.trim().to_lowercase();
+
+        if line == "yes" || line == "y" || line == "approve" || line == "ok" || line == "done" {
             content = store::bump_spec_version(&content);
             store::write_spec(dir, &content, config)?;
             let spec_path = dir.join("SPEC.md");
             writeln!(
                 writer,
                 "\n{} {}",
-                "SPEC.md updated at".green(),
+                "✔ SPEC.md updated at".green(),
                 spec_path.display().to_string().bold()
             )?;
             return Ok(());
-        } else if line.eq_ignore_ascii_case("abort")
-            || line.eq_ignore_ascii_case("no")
-            || line.eq_ignore_ascii_case("cancel")
-        {
+        } else if line == "no" || line == "n" || line == "abort" || line == "cancel" {
             writeln!(writer, "{}", "Aborted. No changes saved.".yellow())?;
             return Ok(());
-        }
-
-        // Step 4: Validate section
-        let matched = renderer::SECTION_HEADINGS
-            .iter()
-            .find(|h| h.eq_ignore_ascii_case(line));
-
-        if let Some(heading) = matched {
-            writeln!(
-                writer,
-                "\nEnter new content for section '{}' (empty line to finish):",
-                heading.bold()
-            )?;
-            let mut new_content = String::new();
-            loop {
-                let section_line = input.readline("")?;
-                if section_line.is_empty() {
-                    break;
+        } else if line == "e" || line == "edit" {
+            writeln!(writer, "{}", "Opening editor...".dimmed())?;
+            match open_in_editor(&content).await {
+                Ok(Some(edited)) => {
+                    writeln!(writer, "{}", "Applying edits...".cyan())?;
+                    content = apply_edits(client, &content, &edited).await?;
                 }
-                new_content.push_str(&section_line);
-                new_content.push('\n');
+                Ok(None) => {
+                    writeln!(writer, "{}", "(No changes detected)".dimmed())?;
+                }
+                Err(e) => {
+                    writeln!(writer, "{} {}", "Editor error:".red(), e)?;
+                }
             }
-
-            // Replace the section
-            content = renderer::replace_section(&content, heading, &new_content);
-
-            // Step 5: Best-effort LLM consistency check
-            let consistency_result = check_consistency(client, &content).await;
-            if let Ok(Some(suggestion)) = consistency_result {
-                writeln!(writer, "\n{}", "LLM consistency note:".cyan())?;
-                writeln!(writer, "{}\n", suggestion)?;
-            }
-        } else if !line.is_empty() {
+        } else {
             writeln!(
                 writer,
                 "{}",
-                "Unknown section. Please enter one of the listed sections.".red()
+                "Enter y (approve), e (edit), or n (abort).".yellow()
             )?;
         }
-    }
-}
-
-/// Best-effort consistency check via LLM after editing a section.
-async fn check_consistency(client: &dyn LlmClient, spec: &str) -> Result<Option<String>> {
-    let system = "You are reviewing a SPEC.md for internal consistency. \
-        If all sections are consistent with each other, respond with exactly 'OK'. \
-        If there are inconsistencies, briefly note them (1-2 sentences max).";
-    let response = client.complete(system, spec).await;
-
-    match response {
-        Ok(text) if text.trim() == "OK" => Ok(None),
-        Ok(text) => Ok(Some(text)),
-        // Silently ignore errors — this is best-effort
-        Err(_) => Ok(None),
     }
 }
 
@@ -501,8 +510,8 @@ mod tests {
         let initial = "---\nspec-version: 1\ncreated: 2024-01-01\nupdated: 2024-01-01\n---\n\n# Project: Test\n\n## Goal\nOld goal\n\n## Scope\nOld scope\n";
         std::fs::write(tmp.path().join("SPEC.md"), initial).unwrap();
 
-        // Edit goal section, then approve
-        let input = "Goal\nNew goal content\n\ndone\n";
+        // Approve immediately (editor-based edit flow not testable with BufRead)
+        let input = "yes\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
@@ -515,7 +524,6 @@ mod tests {
 
         let content = std::fs::read_to_string(tmp.path().join("SPEC.md")).unwrap();
         assert!(content.contains("spec-version: 2"));
-        assert!(content.contains("New goal content"));
     }
 
     #[tokio::test]
@@ -568,18 +576,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_consistency_ok() {
-        let client = AlwaysMock("OK".to_string());
-        let result = check_consistency(&client, "spec content").await.unwrap();
-        assert!(result.is_none());
+    async fn test_apply_edits_returns_llm_output() {
+        let client = AlwaysMock("## Revised spec content".to_string());
+        let result = apply_edits(
+            &client,
+            "original draft",
+            "edited draft <!-- make this shorter -->",
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "## Revised spec content");
     }
 
     #[tokio::test]
-    async fn test_check_consistency_with_issues() {
-        let client =
-            AlwaysMock("The stack section mentions Python but the goal says Rust.".to_string());
-        let result = check_consistency(&client, "spec content").await.unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("Python"));
+    async fn test_apply_edits_passes_both_versions_to_llm() {
+        struct CaptureMock {
+            captured: std::sync::Mutex<String>,
+        }
+        #[async_trait]
+        impl LlmClient for CaptureMock {
+            async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+                *self.captured.lock().unwrap() = user.to_string();
+                Ok("ok".to_string())
+            }
+        }
+        let mock = CaptureMock {
+            captured: std::sync::Mutex::new(String::new()),
+        };
+        apply_edits(&mock, "ORIGINAL_DRAFT", "EDITED_DRAFT")
+            .await
+            .unwrap();
+        let captured = mock.captured.lock().unwrap().clone();
+        assert!(captured.contains("ORIGINAL_DRAFT"));
+        assert!(captured.contains("EDITED_DRAFT"));
     }
 }
