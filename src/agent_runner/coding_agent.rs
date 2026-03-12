@@ -19,16 +19,20 @@ impl CodingAgent {
 
     /// Build the prompt for the coding agent.
     pub fn build_prompt(task: &Task, spec_content: &str, task_detail: &str) -> String {
+        let commit_msg = format!("task {}: {}", task.id, task.name);
         format!(
             "You are implementing task {id}: {name}\n\n\
              SPEC.md:\n{spec}\n\n\
              Task details:\n{detail}\n\n\
              Implement exactly what is described. Stay within the scope defined in \"What NOT to change\".\n\
-             When done, run: cargo test && cargo clippy",
+             When done:\n\
+             1. Run: cargo test && cargo clippy -- -D warnings\n\
+             2. Stage and commit all changes: git add -A && git commit -m \"{commit}\"",
             id = task.id,
             name = task.name,
             spec = spec_content,
             detail = task_detail,
+            commit = commit_msg,
         )
     }
 
@@ -45,7 +49,9 @@ impl CodingAgent {
              Task details:\n{detail}\n\n\
              The previous implementation was reviewed and had issues:\n\n{findings}\n\n\
              Fix all critical issues listed above. Stay within the scope defined in \"What NOT to change\".\n\
-             When done, run: cargo test && cargo clippy",
+             When done:\n\
+             1. Run: cargo test && cargo clippy -- -D warnings\n\
+             2. Stage and commit all changes: git add -A && git commit -m \"task {id}: {name} (retry)\"",
             id = task.id,
             name = task.name,
             spec = spec_content,

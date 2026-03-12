@@ -205,28 +205,47 @@ async fn run_single_task(
             )
             .await?;
 
-        // e. Get git diff (branch vs default branch)
-        let mut diff =
-            git_command(workdir, &["diff", &format!("{}..HEAD", default_branch)]).await?;
-        if diff.is_empty() {
+        // e. Get git diff — capture committed AND uncommitted changes vs default branch.
+        // `git diff <branch>` covers working-tree changes; `git diff --cached <branch>`
+        // covers staged-but-not-committed. Combined they catch everything Claude wrote,
+        // regardless of whether it remembered to `git commit`.
+        let committed = git_command(workdir, &["diff", &format!("{}..HEAD", default_branch)])
+            .await
+            .unwrap_or_default();
+        let unstaged = git_command(workdir, &["diff", default_branch])
+            .await
+            .unwrap_or_default();
+        let staged = git_command(workdir, &["diff", "--cached", default_branch])
+            .await
+            .unwrap_or_default();
+
+        // Prefer committed diff for review; supplement with uncommitted if nothing committed yet
+        let diff = if !committed.is_empty() {
+            committed
+        } else if !unstaged.is_empty() {
             println!(
-                "{} No new commits on branch — running reviews on current HEAD state",
+                "{} Agent has uncommitted changes — running reviews on working-tree diff",
                 "⚠".bold().yellow()
             );
-            // Agent claims the task is already done. Verify by reviewing whatever is
-            // actually at HEAD (show all tracked content vs the empty tree).
-            diff = git_command(workdir, &["show", "--stat", "--patch", "HEAD"])
-                .await
-                .unwrap_or_default();
-
-            if diff.is_empty() {
-                // Truly nothing at HEAD either — agent produced nothing
-                retry_findings = Some(
-                    "No code was produced. Please implement the task as described.".to_string(),
-                );
-                continue;
-            }
-        }
+            unstaged
+        } else if !staged.is_empty() {
+            println!(
+                "{} Agent has staged but uncommitted changes — reviewing staged diff",
+                "⚠".bold().yellow()
+            );
+            staged
+        } else {
+            println!(
+                "{} No changes detected — agent produced nothing",
+                "⚠".bold().yellow()
+            );
+            retry_findings = Some(
+                "No code was produced. Please implement the task as described. \
+                 When done, commit your changes: git add -A && git commit -m \"task impl\""
+                    .to_string(),
+            );
+            continue;
+        };
 
         // f. Run 3 parallel reviews
         println!("{} Running reviews...", "🔍".bold());
