@@ -307,8 +307,21 @@ async fn run_single_task(
 
     // b. Create git branch
     let branch = &task.branch;
-    println!("{} Creating branch: {}", "⎇".bold(), branch.cyan());
-    git_command(workdir, &["checkout", "-b", branch]).await?;
+    // Check if the branch already exists (task was previously attempted)
+    let branch_exists = git_command(workdir, &["rev-parse", "--verify", branch])
+        .await
+        .is_ok();
+    if branch_exists {
+        println!(
+            "{} Branch {} already exists — resuming",
+            "⎇".bold(),
+            branch.cyan()
+        );
+        git_command(workdir, &["checkout", branch]).await?;
+    } else {
+        println!("{} Creating branch: {}", "⎇".bold(), branch.cyan());
+        git_command(workdir, &["checkout", "-b", branch]).await?;
+    }
 
     // c. Notify Telegram
     notifier
