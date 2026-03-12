@@ -205,14 +205,27 @@ async fn run_single_task(
             )
             .await?;
 
-        // e. Get git diff
-        let diff = git_command(workdir, &["diff", &format!("{}..HEAD", default_branch)]).await?;
+        // e. Get git diff (branch vs default branch)
+        let mut diff =
+            git_command(workdir, &["diff", &format!("{}..HEAD", default_branch)]).await?;
         if diff.is_empty() {
             println!(
-                "{} No changes produced by coding agent",
+                "{} No new commits on branch — running reviews on current HEAD state",
                 "⚠".bold().yellow()
             );
-            continue;
+            // Agent claims the task is already done. Verify by reviewing whatever is
+            // actually at HEAD (show all tracked content vs the empty tree).
+            diff = git_command(workdir, &["show", "--stat", "--patch", "HEAD"])
+                .await
+                .unwrap_or_default();
+
+            if diff.is_empty() {
+                // Truly nothing at HEAD either — agent produced nothing
+                retry_findings = Some(
+                    "No code was produced. Please implement the task as described.".to_string(),
+                );
+                continue;
+            }
         }
 
         // f. Run 3 parallel reviews
