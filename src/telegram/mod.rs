@@ -133,14 +133,14 @@ fn format_task_status(tasks: &[crate::types::Task]) -> String {
 async fn run_task_from_bot(config: &Config, task_id: &str) -> Result<String> {
     let api_key = crate::config::resolve_api_key(config)?;
     let client = crate::llm::create_client(config, &api_key)?;
-    crate::agent_runner::run(config, client.as_ref(), Some(task_id)).await?;
+    crate::agent_runner::run(config, client.as_ref(), Some(task_id), false).await?;
     Ok(format!("Task {} execution complete", task_id))
 }
 
 async fn run_task_from_bot_auto(config: &Config) -> Result<String> {
     let api_key = crate::config::resolve_api_key(config)?;
     let client = crate::llm::create_client(config, &api_key)?;
-    crate::agent_runner::run(config, client.as_ref(), None).await?;
+    crate::agent_runner::run(config, client.as_ref(), None, false).await?;
     Ok("Auto-run execution complete".to_string())
 }
 

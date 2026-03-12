@@ -42,6 +42,9 @@ enum Commands {
         /// Run a specific task by ID (e.g., 002)
         #[arg(long)]
         task: Option<String>,
+        /// Run continuously until all tasks are done (or a failure occurs)
+        #[arg(long)]
+        all: bool,
     },
     /// Start Telegram bot polling loop
     Bot,
@@ -80,10 +83,10 @@ async fn main() -> Result<()> {
             let client = llm::create_client(&config, &api_key)?;
             task_generator::split(&config, client.as_ref(), &task).await?;
         }
-        Commands::Run { task } => {
+        Commands::Run { task, all } => {
             let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
-            agent_runner::run(&config, client.as_ref(), task.as_deref()).await?;
+            agent_runner::run(&config, client.as_ref(), task.as_deref(), all).await?;
         }
         Commands::Bot => {
             telegram::run_bot(&config).await?;

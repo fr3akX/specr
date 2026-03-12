@@ -48,9 +48,17 @@ async fn detect_default_branch(workdir: &Path) -> String {
 }
 
 /// Run the agent pipeline for eligible (or specified) tasks.
-pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) -> Result<()> {
+///
+/// - `task_id = Some(id)`: run one specific task, then exit.
+/// - `run_all = true`: loop through all parallel groups until all tasks done or a failure stops the run.
+/// - Default: run the next parallel group, then exit.
+pub async fn run(
+    config: &Config,
+    llm: &dyn LlmClient,
+    task_id: Option<&str>,
+    run_all: bool,
+) -> Result<()> {
     let workdir = std::env::current_dir()?;
-    let (tasks, _version) = store::read_tasks(&workdir)?;
     let spec_content = store::read_spec(&workdir)?;
 
     let notifier = TelegramNotifier::from_config(config);
@@ -61,29 +69,57 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
         default_branch.dimmed()
     );
 
-    let eligible: Vec<&Task> = if let Some(id) = task_id {
+    // --task: run one specific task, ignore --all
+    if let Some(id) = task_id {
+        let (tasks, _) = store::read_tasks(&workdir)?;
         let task = tasks
             .iter()
             .find(|t| t.id == id)
             .with_context(|| format!("Task {} not found", id))?;
-
         if task.status != TaskStatus::Open {
             anyhow::bail!("Task {} has status '{}', expected 'open'", id, task.status);
         }
+        println!(
+            "\n{} Running task {}: {}\n",
+            "→".bold(),
+            task.id.bold(),
+            task.name
+        );
+        return run_task_group(
+            config,
+            llm,
+            &[task],
+            &spec_content,
+            &workdir,
+            &notifier,
+            &default_branch,
+        )
+        .await;
+    }
 
-        vec![task]
-    } else {
-        let eligible = Resolver::eligible(&tasks);
-        if eligible.is_empty() {
-            print_no_eligible_reason(&tasks);
-            return Ok(());
-        }
-        eligible
-    };
+    // --all: loop until everything is done or a failure stops the run
+    if run_all {
+        return run_all_tasks(
+            config,
+            llm,
+            &spec_content,
+            &workdir,
+            &notifier,
+            &default_branch,
+        )
+        .await;
+    }
 
-    println!("\n{} {} task(s) to run\n", "→".bold(), eligible.len());
-
-    for task in &eligible {
+    // Default: run next parallel group, then stop
+    let (tasks, _) = store::read_tasks(&workdir)?;
+    let groups = Resolver::parallel_groups(&tasks);
+    if groups.is_empty() {
+        print_no_eligible_reason(&tasks);
+        return Ok(());
+    }
+    let group = groups.into_iter().next().unwrap_or_default();
+    println!("\n{} {} task(s) to run\n", "→".bold(), group.len());
+    for task in &group {
         println!(
             "{} Task {}: {}",
             "▶".bold().cyan(),
@@ -92,45 +128,161 @@ pub async fn run(config: &Config, llm: &dyn LlmClient, task_id: Option<&str>) ->
         );
     }
     println!();
+    run_task_group(
+        config,
+        llm,
+        &group,
+        &spec_content,
+        &workdir,
+        &notifier,
+        &default_branch,
+    )
+    .await
+}
 
-    // Run tasks from first parallel group (or all if specified via --task)
-    let task_group = if task_id.is_some() {
-        eligible
-    } else {
-        let groups = Resolver::parallel_groups(&tasks);
-        if groups.is_empty() {
+/// Loop through all parallel groups until all tasks are done or a task fails.
+async fn run_all_tasks(
+    config: &Config,
+    llm: &dyn LlmClient,
+    spec_content: &str,
+    workdir: &Path,
+    notifier: &TelegramNotifier,
+    default_branch: &str,
+) -> Result<()> {
+    let mut round = 0usize;
+
+    loop {
+        round += 1;
+        let (tasks, _) = store::read_tasks(workdir)?;
+
+        let done = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done)
+            .count();
+        let total = tasks.len();
+
+        // Check if everything is done
+        if done == total {
+            println!("\n{} All {} tasks completed!\n", "✔".bold().green(), total);
+            notifier
+                .send(&format!("✅ All {} tasks completed!", total))
+                .await
+                .ok();
             return Ok(());
         }
-        groups.into_iter().next().unwrap_or_default()
-    };
 
-    for task in task_group {
+        let groups = Resolver::parallel_groups(&tasks);
+        if groups.is_empty() {
+            println!();
+            print_no_eligible_reason(&tasks);
+            println!(
+                "\n{} Progress: {}/{} tasks done",
+                "ℹ".bold().blue(),
+                done,
+                total
+            );
+            return Ok(());
+        }
+
+        let group = groups.into_iter().next().unwrap_or_default();
+        println!(
+            "\n{} Round {} — running {} task(s)  ({}/{} done)\n",
+            "→".bold(),
+            round,
+            group.len(),
+            done,
+            total
+        );
+        for task in &group {
+            println!(
+                "{} Task {}: {}",
+                "▶".bold().cyan(),
+                task.id.bold(),
+                task.name
+            );
+        }
+        println!();
+
+        let failed = run_task_group_checked(
+            config,
+            llm,
+            &group,
+            spec_content,
+            workdir,
+            notifier,
+            default_branch,
+        )
+        .await?;
+
+        if failed {
+            println!(
+                "\n{} Stopping: a task failed. Fix it and re-run.\n",
+                "✖".bold().red()
+            );
+            return Ok(());
+        }
+    }
+}
+
+/// Run a group of tasks concurrently; returns true if any task failed.
+async fn run_task_group_checked(
+    config: &Config,
+    llm: &dyn LlmClient,
+    group: &[&Task],
+    spec_content: &str,
+    workdir: &Path,
+    notifier: &TelegramNotifier,
+    default_branch: &str,
+) -> Result<bool> {
+    let mut any_failed = false;
+    for task in group {
         if let Err(e) = run_single_task(
             config,
             llm,
             task,
-            &spec_content,
-            &workdir,
-            &notifier,
-            &default_branch,
+            spec_content,
+            workdir,
+            notifier,
+            default_branch,
         )
         .await
         {
             eprintln!("{} Task {} failed: {}", "✖".bold().red(), task.id.bold(), e);
-            store::update_task_status(&workdir, &task.id, TaskStatus::Failed)?;
+            store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
             notifier
                 .send(&format!("❌ Task {} failed: {}", task.id, e))
                 .await
                 .ok();
-
-            // Return to default branch on failure
-            git_command(&workdir, &["checkout", &default_branch])
+            git_command(workdir, &["checkout", default_branch])
                 .await
                 .ok();
+            any_failed = true;
         }
     }
+    Ok(any_failed)
+}
 
-    Ok(())
+/// Run a group of tasks (fire and handle errors per task).
+async fn run_task_group(
+    config: &Config,
+    llm: &dyn LlmClient,
+    group: &[&Task],
+    spec_content: &str,
+    workdir: &Path,
+    notifier: &TelegramNotifier,
+    default_branch: &str,
+) -> Result<()> {
+    run_task_group_checked(
+        config,
+        llm,
+        group,
+        spec_content,
+        workdir,
+        notifier,
+        default_branch,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Run a single task through the full code → review → loop pipeline.
