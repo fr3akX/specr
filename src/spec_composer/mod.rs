@@ -1,15 +1,81 @@
 pub mod questions;
 pub mod renderer;
 
-use std::io::{self, BufRead, Write};
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::{self, Write};
 use std::path::Path;
 
 use anyhow::Result;
 use colored::Colorize;
+use rustyline::DefaultEditor;
 
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::store;
+
+// ---------------------------------------------------------------------------
+// LineInput trait — abstracts readline for production (rustyline) vs tests
+// ---------------------------------------------------------------------------
+
+/// Abstraction over line input. Returns the trimmed line, or empty string on
+/// skip / EOF. Never returns an error for normal empty input.
+pub trait LineInput {
+    fn readline(&mut self, prompt: &str) -> Result<String>;
+}
+
+/// Production implementation backed by rustyline (arrow keys, history, etc.)
+pub struct RustylineInput {
+    editor: DefaultEditor,
+}
+
+impl RustylineInput {
+    pub fn new() -> Result<Self> {
+        let editor =
+            DefaultEditor::new().map_err(|e| anyhow::anyhow!("Failed to init readline: {e}"))?;
+        Ok(Self { editor })
+    }
+}
+
+impl LineInput for RustylineInput {
+    fn readline(&mut self, prompt: &str) -> Result<String> {
+        match self.editor.readline(prompt) {
+            Ok(line) => {
+                // Add non-empty lines to history for ↑ recall
+                if !line.trim().is_empty() {
+                    let _ = self.editor.add_history_entry(&line);
+                }
+                Ok(line.trim().to_string())
+            }
+            // EOF / Ctrl-D treated as empty (skip)
+            Err(rustyline::error::ReadlineError::Eof)
+            | Err(rustyline::error::ReadlineError::Interrupted) => Ok(String::new()),
+            Err(e) => Err(anyhow::anyhow!("Readline error: {e}")),
+        }
+    }
+}
+
+/// Test implementation backed by any `BufRead`.
+#[cfg(test)]
+pub struct BufReadInput<R: BufRead> {
+    reader: R,
+}
+
+#[cfg(test)]
+impl<R: BufRead> BufReadInput<R> {
+    pub fn new(reader: R) -> Self {
+        Self { reader }
+    }
+}
+
+#[cfg(test)]
+impl<R: BufRead> LineInput for BufReadInput<R> {
+    fn readline(&mut self, _prompt: &str) -> Result<String> {
+        let mut line = String::new();
+        self.reader.read_line(&mut line)?;
+        Ok(line.trim().to_string())
+    }
+}
 
 const SYSTEM_PROMPT: &str = "\
 You are a senior software architect. Given a project idea and answers to clarifying questions, \
@@ -24,24 +90,39 @@ pub async fn compose(
     client: &dyn LlmClient,
     output_dir: &Path,
 ) -> Result<()> {
-    compose_with_io(
+    let mut input = RustylineInput::new()?;
+    compose_with_input(
         idea,
         config,
         client,
         output_dir,
-        &mut io::stdin().lock(),
+        &mut input,
         &mut io::stdout(),
     )
     .await
 }
 
 /// Compose with injectable I/O for testing.
+#[cfg(test)]
 pub async fn compose_with_io<R: BufRead, W: Write>(
     idea: &str,
     config: &Config,
     client: &dyn LlmClient,
     output_dir: &Path,
     reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let mut input = BufReadInput::new(reader);
+    compose_with_input(idea, config, client, output_dir, &mut input, writer).await
+}
+
+/// Internal implementation shared by compose() and compose_with_io().
+async fn compose_with_input<L: LineInput, W: Write>(
+    idea: &str,
+    config: &Config,
+    client: &dyn LlmClient,
+    output_dir: &Path,
+    input: &mut L,
     writer: &mut W,
 ) -> Result<()> {
     // Step 1: Welcome
@@ -65,12 +146,7 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
             format!("[{}/{}]", i + 1, question_list.len()).dimmed(),
             question.yellow()
         )?;
-        write!(writer, "> ")?;
-        writer.flush()?;
-
-        let mut answer = String::new();
-        reader.read_line(&mut answer)?;
-        let answer = answer.trim().to_string();
+        let answer = input.readline("> ")?;
 
         if answer.is_empty() || answer.eq_ignore_ascii_case("skip") {
             writeln!(writer, "{}", "(skipped)".dimmed())?;
@@ -96,14 +172,11 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
 
         // Step 5: Ask for approval
         writeln!(writer, "{}", "Approve? (yes / edit <section> / no)".bold())?;
-        write!(writer, "> ")?;
-        writer.flush()?;
 
-        let mut input = String::new();
-        reader.read_line(&mut input)?;
-        let input = input.trim().to_lowercase();
+        let approval_raw = input.readline("> ")?.to_lowercase();
+        let approval = approval_raw.as_str();
 
-        if input == "yes" || input == "y" || input == "approve" {
+        if approval == "yes" || approval == "y" || approval == "approve" || approval == "ok" {
             // Step 6: Write file
             store::write_spec(output_dir, &draft, config)?;
             let spec_path = output_dir.join("SPEC.md");
@@ -114,10 +187,10 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
                 spec_path.display().to_string().bold()
             )?;
             return Ok(());
-        } else if input == "no" || input == "n" {
+        } else if approval == "no" || approval == "n" {
             writeln!(writer, "{}", "Aborted. No file written.".yellow())?;
             return Ok(());
-        } else if let Some(section) = input.strip_prefix("edit ") {
+        } else if let Some(section) = approval.strip_prefix("edit ") {
             let section = section.trim();
             // Validate section name
             let matched = renderer::SECTION_HEADINGS
@@ -127,17 +200,17 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
             if let Some(heading) = matched {
                 writeln!(
                     writer,
-                    "\nEnter new content for section '{}' (end with an empty line):",
+                    "\nEnter new content for section '{}' (empty line to finish):",
                     heading.bold()
                 )?;
                 let mut new_content = String::new();
                 loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line)?;
-                    if line.trim().is_empty() {
+                    let line = input.readline("")?;
+                    if line.is_empty() {
                         break;
                     }
                     new_content.push_str(&line);
+                    new_content.push('\n');
                 }
                 draft = renderer::replace_section(&draft, heading, &new_content);
             } else {
@@ -158,22 +231,29 @@ pub async fn compose_with_io<R: BufRead, W: Write>(
 
 /// Run the refine pipeline: load existing SPEC.md, edit sections, re-approve.
 pub async fn refine(config: &Config, client: &dyn LlmClient, dir: &Path) -> Result<()> {
-    refine_with_io(
-        config,
-        client,
-        dir,
-        &mut io::stdin().lock(),
-        &mut io::stdout(),
-    )
-    .await
+    let mut input = RustylineInput::new()?;
+    refine_with_input(config, client, dir, &mut input, &mut io::stdout()).await
 }
 
 /// Refine with injectable I/O for testing.
+#[cfg(test)]
 pub async fn refine_with_io<R: BufRead, W: Write>(
     config: &Config,
     client: &dyn LlmClient,
     dir: &Path,
     reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let mut input = BufReadInput::new(reader);
+    refine_with_input(config, client, dir, &mut input, writer).await
+}
+
+/// Internal implementation shared by refine() and refine_with_io().
+async fn refine_with_input<L: LineInput, W: Write>(
+    config: &Config,
+    client: &dyn LlmClient,
+    dir: &Path,
+    input: &mut L,
     writer: &mut W,
 ) -> Result<()> {
     // Step 1: Read existing SPEC.md
@@ -198,16 +278,13 @@ pub async fn refine_with_io<R: BufRead, W: Write>(
             "\n{}",
             "Enter section to edit (or 'done' to approve / 'abort' to cancel):".bold()
         )?;
-        write!(writer, "> ")?;
-        writer.flush()?;
+        let line = input.readline("> ")?;
+        let line = line.as_str();
 
-        let mut input = String::new();
-        reader.read_line(&mut input)?;
-        let input = input.trim();
-
-        if input.eq_ignore_ascii_case("done")
-            || input.eq_ignore_ascii_case("yes")
-            || input.eq_ignore_ascii_case("approve")
+        if line.eq_ignore_ascii_case("done")
+            || line.eq_ignore_ascii_case("yes")
+            || line.eq_ignore_ascii_case("approve")
+            || line.eq_ignore_ascii_case("ok")
         {
             // Step 7: Bump version and write
             content = store::bump_spec_version(&content);
@@ -220,9 +297,9 @@ pub async fn refine_with_io<R: BufRead, W: Write>(
                 spec_path.display().to_string().bold()
             )?;
             return Ok(());
-        } else if input.eq_ignore_ascii_case("abort")
-            || input.eq_ignore_ascii_case("no")
-            || input.eq_ignore_ascii_case("cancel")
+        } else if line.eq_ignore_ascii_case("abort")
+            || line.eq_ignore_ascii_case("no")
+            || line.eq_ignore_ascii_case("cancel")
         {
             writeln!(writer, "{}", "Aborted. No changes saved.".yellow())?;
             return Ok(());
@@ -231,22 +308,22 @@ pub async fn refine_with_io<R: BufRead, W: Write>(
         // Step 4: Validate section
         let matched = renderer::SECTION_HEADINGS
             .iter()
-            .find(|h| h.eq_ignore_ascii_case(input));
+            .find(|h| h.eq_ignore_ascii_case(line));
 
         if let Some(heading) = matched {
             writeln!(
                 writer,
-                "\nEnter new content for section '{}' (end with an empty line):",
+                "\nEnter new content for section '{}' (empty line to finish):",
                 heading.bold()
             )?;
             let mut new_content = String::new();
             loop {
-                let mut line = String::new();
-                reader.read_line(&mut line)?;
-                if line.trim().is_empty() {
+                let section_line = input.readline("")?;
+                if section_line.is_empty() {
                     break;
                 }
-                new_content.push_str(&line);
+                new_content.push_str(&section_line);
+                new_content.push('\n');
             }
 
             // Replace the section
@@ -258,7 +335,7 @@ pub async fn refine_with_io<R: BufRead, W: Write>(
                 writeln!(writer, "\n{}", "LLM consistency note:".cyan())?;
                 writeln!(writer, "{}\n", suggestion)?;
             }
-        } else {
+        } else if !line.is_empty() {
             writeln!(
                 writer,
                 "{}",
