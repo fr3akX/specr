@@ -51,9 +51,21 @@ const STYLE_REVIEW_SYSTEM: &str = r#"You are a code quality reviewer. You receiv
 - Are names clear and consistent?
 - Are there any obvious refactoring opportunities?
 
+IMPORTANT: Style issues almost never warrant a "fail" verdict.
+Only mark verdict "fail" with a critical item if the code has a SEVERE structural problem — e.g. spaghetti logic that makes the module impossible to maintain, completely wrong abstraction that violates the spec contract, or names so misleading they would cause bugs.
+
+Things that are NOT critical (put in warnings or suggestions only):
+- Naming preferences
+- Minor simplification opportunities
+- Comment style
+- Code organisation preferences
+- Missing docs on internal functions
+- Rustfmt/clippy style nits
+
+When in doubt, use verdict "pass" with warnings or suggestions. Reserve "fail" for genuinely unreadable or dangerously misleading code.
+
 Output JSON only:
-{"verdict":"pass|fail","critical":["..."],"warnings":["..."],"suggestions":["..."]}
-Style issues are rarely critical — only mark critical if the code is genuinely unreadable or has a major structural problem."#;
+{"verdict":"pass|fail","critical":["..."],"warnings":["..."],"suggestions":["..."]}"#;
 
 /// Build the user prompt containing spec, task detail, and diff.
 fn build_review_user_prompt(spec_content: &str, task_detail: &str, diff: &str) -> String {
