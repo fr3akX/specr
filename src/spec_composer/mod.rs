@@ -377,9 +377,8 @@ mod tests {
         /// Simple mock: always returns the same response for any call.
         fn new(response: &str) -> Self {
             Self {
-                // Return a simple 2-question list for question generation
-                questions_response: r#"["What does this project do?", "What is out of scope?"]"#
-                    .to_string(),
+                // First call = generate_extras: return 1 extra question on top of seeds
+                questions_response: r#"["What is the expected data volume?"]"#.to_string(),
                 spec_response: response.to_string(),
                 call_count: std::sync::atomic::AtomicUsize::new(0),
             }
@@ -418,8 +417,8 @@ mod tests {
         let mock_spec = "---\nspec-version: 1\n---\n\n# Project: Test\n\n## Goal\nTest goal\n";
         let client = MockLlmClient::new(mock_spec);
 
-        // Mock returns 2 questions; answer q1, skip q2, then approve
-        let input = "A todo app\n\ny\n";
+        // Mock: 5 seeds + 1 extra = 6 questions; answer q1, skip rest, then approve
+        let input = "A todo app\n\n\n\n\n\ny\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
@@ -445,8 +444,8 @@ mod tests {
         let config = test_config();
         let client = MockLlmClient::new("draft content");
 
-        // Mock returns 2 questions; provide 2 answers then abort
-        let input = "answer1\nanswer2\nno\n";
+        // Mock: 6 questions; provide 6 answers then abort
+        let input = "answer1\nanswer2\nanswer3\nanswer4\nanswer5\nanswer6\nno\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
@@ -472,8 +471,8 @@ mod tests {
         let config = test_config();
         let client = MockLlmClient::new("draft");
 
-        // Mock returns 2 questions; skip both, then approve
-        let input = "\n\ny\n";
+        // Mock: 6 questions; skip all, then approve
+        let input = "\n\n\n\n\n\ny\n";
         let mut reader = io::Cursor::new(input.as_bytes());
         let mut output = Vec::new();
 
