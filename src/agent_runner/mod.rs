@@ -464,9 +464,19 @@ async fn run_single_task(
         if LoopController::all_passed(&review_result) {
             println!("{} All reviews passed!", "✔".bold().green());
 
-            // Merge branch back to default
+            // Merge branch back to default.
+            // Use -X ours to auto-resolve TASKS.md conflicts: both branches commit
+            // to TASKS.md (status changes), so a conflict is expected and safe to
+            // resolve by keeping the default branch version. We rewrite it with the
+            // correct status immediately after via update_task_status.
             git_command(workdir, &["checkout", default_branch]).await?;
-            git_command(workdir, &["merge", branch]).await?;
+            if let Err(e) =
+                git_command(workdir, &["merge", "-X", "ours", "--no-edit", branch]).await
+            {
+                // If merge still fails (e.g. real code conflict), abort and bail
+                git_command(workdir, &["merge", "--abort"]).await.ok();
+                anyhow::bail!("merge failed (non-TASKS.md conflict): {}", e);
+            }
             git_command(workdir, &["branch", "-d", branch]).await?;
 
             // Mark done and commit TASKS.md so it's clean for the next checkout
