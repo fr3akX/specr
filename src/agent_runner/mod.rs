@@ -439,6 +439,16 @@ async fn run_single_task(
                 "{} No changes detected — agent produced nothing",
                 "⚠".bold().yellow()
             );
+
+            if commit_log.trim().is_empty() {
+                println!(
+                    "{} Branch matches {} — task already completed. Marking done...",
+                    "✔".bold().green(),
+                    default_branch.bold()
+                );
+                return finalize_task_done(ctx, workdir, task, branch).await;
+            }
+
             retry_findings = Some(
                 "No code was produced. Please implement the task as described. \
                  When done, commit your changes: git add -A && git commit -m \"task impl\""
@@ -480,47 +490,7 @@ async fn run_single_task(
         // h. Check results
         if LoopController::all_passed(&review_result) {
             println!("{} All reviews passed!", "✔".bold().green());
-
-            // Merge branch back to default.
-            // Use -X ours to auto-resolve TASKS.md conflicts: both branches commit
-            // to TASKS.md (status changes), so a conflict is expected and safe to
-            // resolve by keeping the default branch version. We rewrite it with the
-            // correct status immediately after via update_task_status.
-            git_command(workdir, &["checkout", default_branch]).await?;
-            if let Err(e) =
-                git_command(workdir, &["merge", "-X", "ours", "--no-edit", branch]).await
-            {
-                // If merge still fails (e.g. real code conflict), abort and bail
-                git_command(workdir, &["merge", "--abort"]).await.ok();
-                anyhow::bail!("merge failed (non-TASKS.md conflict): {}", e);
-            }
-            git_command(workdir, &["branch", "-d", branch]).await?;
-
-            // Mark done and commit TASKS.md so it's clean for the next checkout
-            store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
-            git_command(workdir, &["add", "TASKS.md"]).await.ok();
-            git_command(
-                workdir,
-                &[
-                    "commit",
-                    "-m",
-                    &format!("chore: mark task {} as done", task.id),
-                ],
-            )
-            .await
-            .ok();
-
-            notifier
-                .send(&format!("✅ Task {} completed: {}", task.id, task.name))
-                .await
-                .ok();
-
-            println!(
-                "\n{} Task {} merged and marked as done\n",
-                "✔".bold().green(),
-                task.id.bold()
-            );
-            return Ok(());
+            return finalize_task_done(ctx, workdir, task, branch).await;
         }
 
         // Has critical findings — print them and loop with feedback
@@ -544,6 +514,47 @@ async fn run_single_task(
 
 /// Remove diff hunks for specified file paths from a unified diff string.
 /// Strips everything from `diff --git a/<path>` to the next `diff --git` header.
+async fn finalize_task_done(
+    ctx: &RunCtx<'_>,
+    workdir: &Path,
+    task: &Task,
+    branch: &str,
+) -> Result<()> {
+    let default_branch = ctx.default_branch;
+
+    git_command(workdir, &["checkout", default_branch]).await?;
+    if let Err(e) = git_command(workdir, &["merge", "-X", "ours", "--no-edit", branch]).await {
+        git_command(workdir, &["merge", "--abort"]).await.ok();
+        anyhow::bail!("merge failed (non-TASKS.md conflict): {}", e);
+    }
+    git_command(workdir, &["branch", "-d", branch]).await.ok();
+
+    store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
+    git_command(workdir, &["add", "TASKS.md"]).await.ok();
+    git_command(
+        workdir,
+        &[
+            "commit",
+            "-m",
+            &format!("chore: mark task {} as done", task.id),
+        ],
+    )
+    .await
+    .ok();
+
+    ctx.notifier
+        .send(&format!("✅ Task {} completed: {}", task.id, task.name))
+        .await
+        .ok();
+
+    println!(
+        "\n{} Task {} merged and marked as done\n",
+        "✔".bold().green(),
+        task.id.bold()
+    );
+    Ok(())
+}
+
 fn filter_diff_paths(diff: &str, exclude: &[&str]) -> String {
     let mut result = String::with_capacity(diff.len());
     let mut skip = false;
