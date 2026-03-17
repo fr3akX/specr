@@ -384,7 +384,19 @@ async fn run_single_task(
             config.spec.max_loop_iterations
         );
 
-        // d. Spawn coding agent
+        // d. Optionally show agent reasoning before running
+        if config.agent.show_reasoning {
+            show_reasoning(
+                llm,
+                task,
+                spec_content,
+                &task_detail,
+                retry_findings.as_deref(),
+            )
+            .await;
+        }
+
+        // e. Spawn coding agent
         println!("{} Running coding agent...", "⚙".bold());
         agent
             .run(
@@ -396,7 +408,7 @@ async fn run_single_task(
             )
             .await?;
 
-        // e. Get git diff — capture committed AND uncommitted changes vs default branch.
+        // f. Get git diff — capture committed AND uncommitted changes vs default branch.
         // `git diff <branch>` covers working-tree changes; `git diff --cached <branch>`
         // covers staged-but-not-committed. Combined they catch everything Claude wrote,
         // regardless of whether it remembered to `git commit`.
@@ -438,7 +450,7 @@ async fn run_single_task(
             continue;
         };
 
-        // f. Run 3 parallel reviews
+        // g. Run 3 parallel reviews
         // Filter TASKS.md out of the diff — it's specr state, not implementation,
         // and its presence confuses reviewers (they see "done"/"failed" changes, not code).
         let review_diff = filter_diff_paths(&diff, &["TASKS.md"]);
@@ -460,7 +472,7 @@ async fn run_single_task(
         // Print review summary
         print_review_summary(&review_result);
 
-        // g. Check results
+        // h. Check results
         if LoopController::all_passed(&review_result) {
             println!("{} All reviews passed!", "✔".bold().green());
 
@@ -542,6 +554,46 @@ fn filter_diff_paths(diff: &str, exclude: &[&str]) -> String {
     }
 
     result
+}
+
+const REASONING_SYSTEM: &str = "\
+You are a senior engineer about to implement a task. \
+Given the spec and task details, briefly explain your approach in 3-5 bullet points. \
+Be concrete: name the files you'll touch, the key design decisions, and any edge cases you'll handle. \
+Keep it under 150 words. No preamble, no sign-off — just the bullets.";
+
+/// Ask the LLM for a brief plan before the coding agent runs. Best-effort — never blocks execution.
+async fn show_reasoning(
+    llm: &dyn LlmClient,
+    task: &Task,
+    spec_content: &str,
+    task_detail: &str,
+    retry_findings: Option<&str>,
+) {
+    let user = if let Some(findings) = retry_findings {
+        format!(
+            "Task {}: {}\n\nSpec:\n{}\n\nTask detail:\n{}\n\nPrevious review findings to fix:\n{}",
+            task.id, task.name, spec_content, task_detail, findings
+        )
+    } else {
+        format!(
+            "Task {}: {}\n\nSpec:\n{}\n\nTask detail:\n{}",
+            task.id, task.name, spec_content, task_detail
+        )
+    };
+
+    match llm.complete(REASONING_SYSTEM, &user).await {
+        Ok(plan) => {
+            println!("\n{}", "💭 Agent plan:".bold().cyan());
+            for line in plan.trim().lines() {
+                println!("   {}", line);
+            }
+            println!();
+        }
+        Err(_) => {
+            // Reasoning is best-effort — silently skip on failure
+        }
+    }
 }
 
 fn print_review_summary(result: &review::ReviewResult) {

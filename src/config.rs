@@ -58,6 +58,9 @@ pub struct AgentConfig {
     pub runner: String,
     pub runner_bin: String,
     pub stream_output: bool,
+    /// Show LLM reasoning (approach plan) before running the coding agent. Default: true.
+    #[serde(default = "default_true")]
+    pub show_reasoning: bool,
 }
 
 impl Default for AgentConfig {
@@ -66,8 +69,13 @@ impl Default for AgentConfig {
             runner: "claude-code".to_string(),
             runner_bin: "claude".to_string(),
             stream_output: true,
+            show_reasoning: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
