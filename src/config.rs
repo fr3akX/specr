@@ -73,6 +73,13 @@ pub struct AgentConfig {
     /// Show LLM reasoning (approach plan) before running the coding agent. Default: true.
     #[serde(default = "default_true")]
     pub show_reasoning: bool,
+    /// Max tool-use turns for the "api-agent" runner. Default: 30.
+    #[serde(default = "default_max_agent_turns")]
+    pub max_agent_turns: u32,
+}
+
+fn default_max_agent_turns() -> u32 {
+    30
 }
 
 impl Default for AgentConfig {
@@ -82,6 +89,7 @@ impl Default for AgentConfig {
             runner_bin: "claude".to_string(),
             stream_output: true,
             show_reasoning: true,
+            max_agent_turns: default_max_agent_turns(),
         }
     }
 }

@@ -1,3 +1,4 @@
+pub mod api_agent;
 pub mod coding_agent;
 pub mod loop_controller;
 pub mod resolver;
@@ -372,17 +373,39 @@ async fn run_single_task(
             .await;
         }
 
-        // e. Spawn coding agent
+        // e. Spawn coding agent (claude-code or api-agent)
         println!("{} Running coding agent...", "⚙".bold());
-        agent
-            .run(
-                task,
-                spec_content,
-                &task_detail,
-                workdir,
-                retry_findings.as_deref(),
-            )
-            .await?;
+        if config.agent.runner == "api-agent" {
+            let api_key = crate::config::resolve_review_api_key(config)?;
+            let agent_model = if config.llm.model.is_empty() {
+                "claude-opus-4-6".to_string()
+            } else {
+                config.llm.model.clone()
+            };
+            let api_agent =
+                api_agent::ApiCodingAgent::new(api_key, agent_model, config.agent.max_agent_turns);
+            let system =
+                "You are an expert software engineer implementing a task in an existing codebase. \
+                          Use the provided tools to read, write, and run code. \
+                          Always verify your work by running tests before finishing.";
+            let prompt = match retry_findings.as_deref() {
+                Some(findings) => {
+                    CodingAgent::build_retry_prompt(task, spec_content, &task_detail, findings)
+                }
+                None => CodingAgent::build_prompt(task, spec_content, &task_detail),
+            };
+            api_agent.run(system, &prompt, workdir).await?;
+        } else {
+            agent
+                .run(
+                    task,
+                    spec_content,
+                    &task_detail,
+                    workdir,
+                    retry_findings.as_deref(),
+                )
+                .await?;
+        }
 
         // f. Get git diff — capture committed AND uncommitted changes vs default branch.
         // `git diff <branch>` covers working-tree changes; `git diff --cached <branch>`
