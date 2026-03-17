@@ -115,7 +115,7 @@ impl Default for Config {
             llm: LlmConfig {
                 provider: "claude-cli".to_string(),
                 model: "sonnet".to_string(),
-                api_key_env: "ANTHROPIC_API_KEY".to_string(),
+                api_key_env: "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
                 timeout_seconds: default_llm_timeout_seconds(),
                 review_timeout_seconds: default_review_timeout_seconds(),
                 review_model: String::new(), // empty = use same as model
@@ -241,7 +241,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.llm.provider, "claude-cli");
         assert_eq!(config.llm.model, "sonnet");
-        assert_eq!(config.llm.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(config.llm.api_key_env, "CLAUDE_CODE_OAUTH_TOKEN");
         assert_eq!(config.llm.timeout_seconds, 300);
         assert_eq!(config.llm.review_timeout_seconds, 120);
         assert_eq!(config.output.base_dir, ".");

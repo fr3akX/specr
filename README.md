@@ -166,7 +166,7 @@ Config file: `~/Library/Application Support/specr/config.toml` (macOS) — auto-
 [llm]
 provider = "claude-cli"          # claude-cli | anthropic | openai
 model = "sonnet"                 # model alias or full name
-api_key_env = "ANTHROPIC_API_KEY"  # only needed for anthropic/openai providers
+api_key_env = "CLAUDE_CODE_OAUTH_TOKEN"  # only needed for anthropic/openai providers
 timeout_seconds = 300            # timeout for a single LLM completion
 
 [output]
@@ -193,7 +193,7 @@ autostart = false                # start bot daemon automatically
 
 **`claude-cli`** (default) — uses the `claude` CLI subprocess. No API key needed; uses your Claude Code subscription. Runs from a temp directory to avoid workspace scanning delays.
 
-**`anthropic`** — direct Anthropic API calls. Set `ANTHROPIC_API_KEY`.
+**`anthropic`** — direct Anthropic API calls. Set `CLAUDE_CODE_OAUTH_TOKEN`.
 
 **`openai`** — OpenAI Chat Completions. Set `OPENAI_API_KEY` (and update `api_key_env`).
 
