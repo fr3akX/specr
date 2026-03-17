@@ -463,6 +463,18 @@ async fn run_single_task(
         let review_diff = filter_diff_paths(&diff, &["TASKS.md"]);
         let review_file_list = filter_diff_paths(&changed_files, &["TASKS.md"]);
 
+        // If the code diff (excl. TASKS.md) is empty, the implementation was already
+        // merged to master via another branch. The diff correctly shows nothing — but
+        // reviewers can't assess code they can't see. Mark done immediately.
+        if review_diff.trim().is_empty() && review_file_list.trim().is_empty() {
+            println!(
+                "{} No code changes on branch (implementation already merged to {}) — marking done",
+                "✔".bold().green(),
+                default_branch.bold()
+            );
+            return finalize_task_done(ctx, workdir, task, branch).await;
+        }
+
         println!("{} Running reviews...", "🔍".bold());
         let review_timeout = std::time::Duration::from_secs(config.llm.review_timeout_seconds);
         let review_result = tokio::time::timeout(
