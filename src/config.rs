@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Top-level configuration loaded from ~/.config/specr/config.toml.
@@ -30,6 +31,19 @@ pub struct LlmConfig {
     /// Set to a faster/cheaper model (e.g. "haiku") to speed up reviews.
     #[serde(default)]
     pub review_model: String,
+    /// Provider for review agents. Defaults to same as `provider`.
+    /// Set to "anthropic" to use direct API for reviews while using claude-cli for coding.
+    #[serde(default)]
+    pub review_provider: String,
+    /// OpenClaw agent ID for auto-discovery of Anthropic OAuth token.
+    /// When review_provider = "anthropic" and ANTHROPIC_API_KEY is not set,
+    /// specr reads the token from ~/.openclaw/agents/<id>/agent/auth-profiles.json.
+    #[serde(default = "default_openclaw_agent")]
+    pub openclaw_agent: String,
+}
+
+fn default_openclaw_agent() -> String {
+    "dev_agent".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +125,8 @@ impl Default for Config {
                 timeout_seconds: default_llm_timeout_seconds(),
                 review_timeout_seconds: default_review_timeout_seconds(),
                 review_model: String::new(), // empty = use same as model
+                review_provider: String::new(), // empty = use same as provider
+                openclaw_agent: default_openclaw_agent(),
             },
             output: OutputConfig {
                 base_dir: ".".to_string(),
@@ -178,6 +194,65 @@ pub fn resolve_api_key_optional(config: &Config) -> Result<String> {
         return Ok(String::new());
     }
     resolve_api_key(config)
+}
+
+/// Read the Anthropic OAuth token from OpenClaw's auth-profiles.json for a given agent.
+/// Returns None if the file doesn't exist or doesn't contain an anthropic token.
+pub fn read_openclaw_anthropic_token(agent_id: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let path = home
+        .join(".openclaw")
+        .join("agents")
+        .join(agent_id)
+        .join("agent")
+        .join("auth-profiles.json");
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: Value = serde_json::from_str(&content).ok()?;
+    let token = json
+        .get("profiles")?
+        .get("anthropic:default")?
+        .get("token")?
+        .as_str()?;
+    Some(token.to_string())
+}
+
+/// Resolve API key for review calls.
+/// Priority order:
+///   1. ANTHROPIC_API_KEY env var
+///   2. OpenClaw auth-profiles.json (auto-discovery via openclaw_agent config)
+///   3. Error with clear message
+pub fn resolve_review_api_key(config: &Config) -> Result<String> {
+    let effective_provider = if config.llm.review_provider.is_empty() {
+        &config.llm.provider
+    } else {
+        &config.llm.review_provider
+    };
+
+    // Providers that don't need a key
+    if effective_provider == "claude-cli" {
+        return Ok(String::new());
+    }
+
+    // 1. Explicit env var
+    if let Ok(key) = std::env::var(&config.llm.api_key_env) {
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+
+    // 2. OpenClaw auth-profiles token (Anthropic only)
+    if effective_provider == "anthropic" {
+        if let Some(token) = read_openclaw_anthropic_token(&config.llm.openclaw_agent) {
+            return Ok(token);
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No API key found for review provider '{effective_provider}'. \
+         Set {} in your environment, or add an anthropic token via 'claude setup-token'.",
+        config.llm.api_key_env
+    ))
 }
 
 #[cfg(test)]

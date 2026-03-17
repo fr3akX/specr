@@ -14,17 +14,26 @@ pub trait LlmClient: Send + Sync {
 }
 
 /// Create an LLM client for review agents.
-/// Uses `config.llm.review_model` if set; falls back to `config.llm.model`.
+///
+/// Uses `review_provider` and `review_model` if set; falls back to `provider` / `model`.
+/// `api_key` is used when the effective provider needs a key; pass empty string for
+/// claude-cli. For the "anthropic" provider without a key, callers should use
+/// `config::resolve_review_api_key` which also checks OpenClaw's auth-profiles.
 pub fn create_review_client(config: &Config, api_key: &str) -> Result<Box<dyn LlmClient>> {
     let effective_model = if config.llm.review_model.is_empty() {
         config.llm.model.clone()
     } else {
         config.llm.review_model.clone()
     };
+    let effective_provider = if config.llm.review_provider.is_empty() {
+        config.llm.provider.clone()
+    } else {
+        config.llm.review_provider.clone()
+    };
 
-    // Temporarily override model in a cloned config
     let mut review_config = config.clone();
     review_config.llm.model = effective_model;
+    review_config.llm.provider = effective_provider;
     create_client(&review_config, api_key)
 }
 
