@@ -422,6 +422,27 @@ async fn run_single_task(
             .await
             .unwrap_or_default();
 
+        // Collect branch metadata for reviewer context:
+        // - commit log (all commits on branch since default_branch)
+        // - changed file list (even if diff is truncated)
+        let commit_log = git_command(
+            workdir,
+            &["log", "--oneline", &format!("{}..HEAD", default_branch)],
+        )
+        .await
+        .unwrap_or_default();
+
+        let changed_files = git_command(
+            workdir,
+            &[
+                "diff",
+                "--name-status",
+                &format!("{}..HEAD", default_branch),
+            ],
+        )
+        .await
+        .unwrap_or_default();
+
         // Prefer committed diff for review; supplement with uncommitted if nothing committed yet
         let diff = if !committed.is_empty() {
             committed
@@ -454,12 +475,20 @@ async fn run_single_task(
         // Filter TASKS.md out of the diff — it's specr state, not implementation,
         // and its presence confuses reviewers (they see "done"/"failed" changes, not code).
         let review_diff = filter_diff_paths(&diff, &["TASKS.md"]);
+        let review_file_list = filter_diff_paths(&changed_files, &["TASKS.md"]);
 
         println!("{} Running reviews...", "🔍".bold());
         let review_timeout = std::time::Duration::from_secs(config.llm.review_timeout_seconds);
         let review_result = tokio::time::timeout(
             review_timeout,
-            run_reviews(llm, spec_content, &task_detail, &review_diff),
+            run_reviews(
+                llm,
+                spec_content,
+                &task_detail,
+                &review_diff,
+                &commit_log,
+                &review_file_list,
+            ),
         )
         .await
         .map_err(|_| {

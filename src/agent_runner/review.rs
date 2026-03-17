@@ -67,12 +67,32 @@ When in doubt, use verdict "pass" with warnings or suggestions. Reserve "fail" f
 Output JSON only:
 {"verdict":"pass|fail","critical":["..."],"warnings":["..."],"suggestions":["..."]}"#;
 
-/// Build the user prompt containing spec, task detail, and diff.
-fn build_review_user_prompt(spec_content: &str, task_detail: &str, diff: &str) -> String {
-    format!(
-        "SPEC.md:\n{}\n\nTask details:\n{}\n\nGit diff:\n{}",
-        spec_content, task_detail, diff
-    )
+/// Build the user prompt containing spec, task detail, branch context, and diff.
+fn build_review_user_prompt(
+    spec_content: &str,
+    task_detail: &str,
+    diff: &str,
+    commit_log: &str,
+    changed_files: &str,
+) -> String {
+    let mut prompt = format!(
+        "SPEC.md:\n{}\n\nTask details:\n{}",
+        spec_content, task_detail
+    );
+
+    if !commit_log.is_empty() {
+        prompt.push_str(&format!("\n\nCommits on this branch:\n{}", commit_log));
+    }
+
+    if !changed_files.is_empty() {
+        prompt.push_str(&format!(
+            "\n\nAll files changed on this branch:\n{}",
+            changed_files
+        ));
+    }
+
+    prompt.push_str(&format!("\n\nGit diff (most recent changes):\n{}", diff));
+    prompt
 }
 
 /// Parse a JSON review response into a Finding.
@@ -121,8 +141,11 @@ pub async fn run_reviews(
     spec_content: &str,
     task_detail: &str,
     diff: &str,
+    commit_log: &str,
+    changed_files: &str,
 ) -> Result<ReviewResult> {
-    let user_prompt = build_review_user_prompt(spec_content, task_detail, diff);
+    let user_prompt =
+        build_review_user_prompt(spec_content, task_detail, diff, commit_log, changed_files);
 
     let (code_resp, qa_resp, style_resp) = tokio::try_join!(
         llm.complete(CODE_REVIEW_SYSTEM, &user_prompt),
@@ -199,10 +222,13 @@ mod tests {
 
     #[test]
     fn test_build_review_user_prompt() {
-        let prompt = build_review_user_prompt("spec", "task", "diff content");
+        let prompt =
+            build_review_user_prompt("spec", "task", "diff content", "abc fix", "A src/lib.rs");
         assert!(prompt.contains("SPEC.md:\nspec"));
         assert!(prompt.contains("Task details:\ntask"));
-        assert!(prompt.contains("Git diff:\ndiff content"));
+        assert!(prompt.contains("Git diff (most recent changes):\ndiff content"));
+        assert!(prompt.contains("Commits on this branch:\nabc fix"));
+        assert!(prompt.contains("All files changed on this branch:\nA src/lib.rs"));
     }
 
     #[test]
@@ -241,7 +267,16 @@ mod tests {
         }
 
         let llm = MockLlm;
-        let result = run_reviews(&llm, "spec", "task", "diff").await.unwrap();
+        let result = run_reviews(
+            &llm,
+            "spec",
+            "task",
+            "diff",
+            "abc123 add builder",
+            "A src/builder.rs",
+        )
+        .await
+        .unwrap();
         assert_eq!(result.code_review.verdict, Verdict::Pass);
         assert_eq!(result.qa_review.verdict, Verdict::Pass);
         assert_eq!(result.style_review.verdict, Verdict::Pass);
@@ -274,7 +309,16 @@ mod tests {
         let llm = MockLlm {
             call_count: AtomicU32::new(0),
         };
-        let result = run_reviews(&llm, "spec", "task", "diff").await.unwrap();
+        let result = run_reviews(
+            &llm,
+            "spec",
+            "task",
+            "diff",
+            "abc123 add builder",
+            "A src/builder.rs",
+        )
+        .await
+        .unwrap();
         assert_eq!(result.code_review.verdict, Verdict::Fail);
         assert_eq!(result.qa_review.verdict, Verdict::Pass);
         assert_eq!(result.style_review.verdict, Verdict::Pass);
@@ -294,7 +338,15 @@ mod tests {
         }
 
         let llm = FailingLlm;
-        let result = run_reviews(&llm, "spec", "task", "diff").await;
+        let result = run_reviews(
+            &llm,
+            "spec",
+            "task",
+            "diff",
+            "abc123 add builder",
+            "A src/builder.rs",
+        )
+        .await;
         assert!(result.is_err());
     }
 }
