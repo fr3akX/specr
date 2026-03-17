@@ -72,16 +72,23 @@ impl LlmClient for AnthropicClient {
             }],
         };
 
-        let response = self
+        // API keys (sk-ant-api...) use x-api-key header.
+        // OAuth/subscription tokens (sk-ant-oat...) use Authorization: Bearer.
+        let mut req = self
             .http
             .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to Anthropic API. Check your network connection and try again.")?;
+            .header("content-type", "application/json");
+
+        if self.api_key.starts_with("sk-ant-oat") {
+            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        } else {
+            req = req.header("x-api-key", &self.api_key);
+        }
+
+        let response = req.json(&request).send().await.context(
+            "Failed to send request to Anthropic API. Check your network connection and try again.",
+        )?;
 
         let status = response.status();
         if !status.is_success() {
