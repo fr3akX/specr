@@ -13,6 +13,21 @@ pub trait LlmClient: Send + Sync {
     async fn complete(&self, system: &str, user: &str) -> Result<String>;
 }
 
+/// Create an LLM client for review agents.
+/// Uses `config.llm.review_model` if set; falls back to `config.llm.model`.
+pub fn create_review_client(config: &Config, api_key: &str) -> Result<Box<dyn LlmClient>> {
+    let effective_model = if config.llm.review_model.is_empty() {
+        config.llm.model.clone()
+    } else {
+        config.llm.review_model.clone()
+    };
+
+    // Temporarily override model in a cloned config
+    let mut review_config = config.clone();
+    review_config.llm.model = effective_model;
+    create_client(&review_config, api_key)
+}
+
 /// Create the appropriate LLM client based on config.
 ///
 /// For `claude-cli` provider, no API key is needed — it uses the `claude`

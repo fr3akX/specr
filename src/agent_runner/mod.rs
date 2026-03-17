@@ -50,11 +50,21 @@ async fn detect_default_branch(workdir: &Path) -> String {
 /// Run the agent pipeline for eligible (or specified) tasks.
 ///
 /// - `task_id = Some(id)`: run one specific task, then exit.
+// Shared execution context passed through the task pipeline to keep arg counts manageable.
+struct RunCtx<'a> {
+    config: &'a Config,
+    llm: &'a dyn LlmClient,
+    review_llm: &'a dyn LlmClient,
+    notifier: &'a TelegramNotifier,
+    default_branch: &'a str,
+}
+
 /// - `run_all = true`: loop through all parallel groups until all tasks done or a failure stops the run.
 /// - Default: run the next parallel group, then exit.
 pub async fn run(
     config: &Config,
     llm: &dyn LlmClient,
+    review_llm: &dyn LlmClient,
     task_id: Option<&str>,
     run_all: bool,
 ) -> Result<()> {
@@ -68,6 +78,14 @@ pub async fn run(
         "⎇".dimmed(),
         default_branch.dimmed()
     );
+
+    let ctx = RunCtx {
+        config,
+        llm,
+        review_llm,
+        notifier: &notifier,
+        default_branch: &default_branch,
+    };
 
     // --task: run one specific task, ignore --all
     if let Some(id) = task_id {
@@ -85,29 +103,12 @@ pub async fn run(
             task.id.bold(),
             task.name
         );
-        return run_task_group(
-            config,
-            llm,
-            &[task],
-            &spec_content,
-            &workdir,
-            &notifier,
-            &default_branch,
-        )
-        .await;
+        return run_task_group(&ctx, &[task], &spec_content, &workdir).await;
     }
 
     // --all: loop until everything is done or a failure stops the run
     if run_all {
-        return run_all_tasks(
-            config,
-            llm,
-            &spec_content,
-            &workdir,
-            &notifier,
-            &default_branch,
-        )
-        .await;
+        return run_all_tasks(&ctx, &spec_content, &workdir).await;
     }
 
     // Default: run next parallel group, then stop
@@ -128,27 +129,11 @@ pub async fn run(
         );
     }
     println!();
-    run_task_group(
-        config,
-        llm,
-        &group,
-        &spec_content,
-        &workdir,
-        &notifier,
-        &default_branch,
-    )
-    .await
+    run_task_group(&ctx, &group, &spec_content, &workdir).await
 }
 
 /// Loop through all parallel groups until all tasks are done or a task fails.
-async fn run_all_tasks(
-    config: &Config,
-    llm: &dyn LlmClient,
-    spec_content: &str,
-    workdir: &Path,
-    notifier: &TelegramNotifier,
-    default_branch: &str,
-) -> Result<()> {
+async fn run_all_tasks(ctx: &RunCtx<'_>, spec_content: &str, workdir: &Path) -> Result<()> {
     let mut round = 0usize;
 
     loop {
@@ -164,7 +149,7 @@ async fn run_all_tasks(
         // Check if everything is done
         if done == total {
             println!("\n{} All {} tasks completed!\n", "✔".bold().green(), total);
-            notifier
+            ctx.notifier
                 .send(&format!("✅ All {} tasks completed!", total))
                 .await
                 .ok();
@@ -203,16 +188,7 @@ async fn run_all_tasks(
         }
         println!();
 
-        let failed = run_task_group_checked(
-            config,
-            llm,
-            &group,
-            spec_content,
-            workdir,
-            notifier,
-            default_branch,
-        )
-        .await?;
+        let failed = run_task_group_checked(ctx, &group, spec_content, workdir).await?;
 
         if failed {
             println!(
@@ -229,34 +205,21 @@ async fn run_all_tasks(
 /// but are run one at a time because each needs an exclusive git checkout.
 /// True parallelism would require git worktrees — not yet implemented.
 async fn run_task_group_checked(
-    config: &Config,
-    llm: &dyn LlmClient,
+    ctx: &RunCtx<'_>,
     group: &[&Task],
     spec_content: &str,
     workdir: &Path,
-    notifier: &TelegramNotifier,
-    default_branch: &str,
 ) -> Result<bool> {
     let mut any_failed = false;
     for task in group {
-        if let Err(e) = run_single_task(
-            config,
-            llm,
-            task,
-            spec_content,
-            workdir,
-            notifier,
-            default_branch,
-        )
-        .await
-        {
+        if let Err(e) = run_single_task(ctx, task, spec_content, workdir).await {
             eprintln!("{} Task {} failed: {}", "✖".bold().red(), task.id.bold(), e);
             store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
-            notifier
+            ctx.notifier
                 .send(&format!("❌ Task {} failed: {}", task.id, e))
                 .await
                 .ok();
-            git_command(workdir, &["checkout", default_branch])
+            git_command(workdir, &["checkout", ctx.default_branch])
                 .await
                 .ok();
             any_failed = true;
@@ -267,37 +230,28 @@ async fn run_task_group_checked(
 
 /// Run a group of tasks (fire and handle errors per task).
 async fn run_task_group(
-    config: &Config,
-    llm: &dyn LlmClient,
+    ctx: &RunCtx<'_>,
     group: &[&Task],
     spec_content: &str,
     workdir: &Path,
-    notifier: &TelegramNotifier,
-    default_branch: &str,
 ) -> Result<()> {
-    run_task_group_checked(
-        config,
-        llm,
-        group,
-        spec_content,
-        workdir,
-        notifier,
-        default_branch,
-    )
-    .await
-    .map(|_| ())
+    run_task_group_checked(ctx, group, spec_content, workdir)
+        .await
+        .map(|_| ())
 }
 
 /// Run a single task through the full code → review → loop pipeline.
 async fn run_single_task(
-    config: &Config,
-    llm: &dyn LlmClient,
+    ctx: &RunCtx<'_>,
     task: &Task,
     spec_content: &str,
     workdir: &Path,
-    notifier: &TelegramNotifier,
-    default_branch: &str,
 ) -> Result<()> {
+    let config = ctx.config;
+    let llm = ctx.llm;
+    let review_llm = ctx.review_llm;
+    let notifier = ctx.notifier;
+    let default_branch = ctx.default_branch;
     let task_detail = store::read_task_detail(workdir, &task.id).unwrap_or_else(|_| {
         format!(
             "Task {}: {}\nScope: {}\nDone when: {}",
@@ -336,6 +290,28 @@ async fn run_single_task(
     } else {
         println!("{} Creating branch: {}", "⎇".bold(), branch.cyan());
         git_command(workdir, &["checkout", "-b", branch]).await?;
+    }
+
+    // Sync branch with latest default branch to avoid stale-branch false diffs.
+    // Other tasks may have merged to default since this branch was created, making
+    // those new files appear as "deleted" in the diff. Merging default in prevents that.
+    println!(
+        "{} Syncing branch with {}...",
+        "⎇".dimmed(),
+        default_branch.dimmed()
+    );
+    match git_command(
+        workdir,
+        &["merge", "-X", "ours", "--no-edit", default_branch],
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            // Non-fatal: sync failed (e.g. unrelated history), continue without it
+            git_command(workdir, &["merge", "--abort"]).await.ok();
+            println!("{} Branch sync skipped: {}", "⚠".dimmed(), e);
+        }
     }
 
     // c. Notify Telegram
@@ -482,7 +458,7 @@ async fn run_single_task(
         let review_result = tokio::time::timeout(
             review_timeout,
             run_reviews(
-                llm,
+                review_llm,
                 spec_content,
                 &task_detail,
                 &review_diff,

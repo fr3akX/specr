@@ -86,7 +86,15 @@ async fn main() -> Result<()> {
         Commands::Run { task, all } => {
             let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
-            agent_runner::run(&config, client.as_ref(), task.as_deref(), all).await?;
+            let review_client = llm::create_review_client(&config, &api_key)?;
+            agent_runner::run(
+                &config,
+                client.as_ref(),
+                review_client.as_ref(),
+                task.as_deref(),
+                all,
+            )
+            .await?;
         }
         Commands::Bot => {
             telegram::run_bot(&config).await?;

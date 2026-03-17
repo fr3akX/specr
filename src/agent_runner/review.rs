@@ -135,7 +135,7 @@ fn extract_json(response: &str) -> &str {
     trimmed
 }
 
-/// Run all three reviews concurrently.
+/// Run all three reviews concurrently, with one automatic retry on invalid JSON.
 pub async fn run_reviews(
     llm: &dyn LlmClient,
     spec_content: &str,
@@ -153,10 +153,29 @@ pub async fn run_reviews(
         llm.complete(STYLE_REVIEW_SYSTEM, &user_prompt),
     )?;
 
+    let code_review = parse_finding(&code_resp);
+    let qa_review = parse_finding(&qa_resp);
+    let mut style_review = parse_finding(&style_resp);
+
+    // Retry style review if it returned invalid JSON — style LLM occasionally
+    // wraps its response in prose instead of raw JSON
+    if style_review
+        .critical
+        .iter()
+        .any(|c| c.contains("invalid JSON"))
+    {
+        if let Ok(retry_resp) = llm.complete(STYLE_REVIEW_SYSTEM, &user_prompt).await {
+            let retry = parse_finding(&retry_resp);
+            if !retry.critical.iter().any(|c| c.contains("invalid JSON")) {
+                style_review = retry;
+            }
+        }
+    }
+
     Ok(ReviewResult {
-        code_review: parse_finding(&code_resp),
-        qa_review: parse_finding(&qa_resp),
-        style_review: parse_finding(&style_resp),
+        code_review,
+        qa_review,
+        style_review,
     })
 }
 

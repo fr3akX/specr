@@ -26,6 +26,10 @@ pub struct LlmConfig {
     /// Timeout (seconds) for each review LLM call. Defaults to 120s.
     #[serde(default = "default_review_timeout_seconds")]
     pub review_timeout_seconds: u64,
+    /// Model to use for review agents. Defaults to same as `model`.
+    /// Set to a faster/cheaper model (e.g. "haiku") to speed up reviews.
+    #[serde(default)]
+    pub review_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +110,7 @@ impl Default for Config {
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
                 timeout_seconds: default_llm_timeout_seconds(),
                 review_timeout_seconds: default_review_timeout_seconds(),
+                review_model: String::new(), // empty = use same as model
             },
             output: OutputConfig {
                 base_dir: ".".to_string(),
