@@ -481,7 +481,9 @@ async fn run_single_task(
         // Filter TASKS.md out of the diff — it's specr state, not implementation,
         // and its presence confuses reviewers (they see "done"/"failed" changes, not code).
         let review_diff = filter_diff_paths(&diff, &["TASKS.md"]);
-        let review_file_list = filter_diff_paths(&changed_files, &["TASKS.md"]);
+        // changed_files is --name-status format ("M\tTASKS.md"), not unified diff.
+        // Use a separate filter that works on that format.
+        let review_file_list = filter_name_status(&changed_files, &["TASKS.md"]);
 
         // If the code diff (excl. TASKS.md) is empty, the implementation was already
         // merged to master via another branch. The diff correctly shows nothing — but
@@ -585,6 +587,19 @@ async fn finalize_task_done(
         task.id.bold()
     );
     Ok(())
+}
+
+/// Filter lines from `git diff --name-status` output, excluding paths that
+/// contain any of the given strings. Input: "M\tTASKS.md" per line.
+fn filter_name_status(name_status: &str, exclude: &[&str]) -> String {
+    name_status
+        .lines()
+        .filter(|line| {
+            let path = line.split('\t').nth(1).unwrap_or(line);
+            !exclude.iter().any(|ex| path.contains(ex))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn filter_diff_paths(diff: &str, exclude: &[&str]) -> String {
@@ -800,6 +815,27 @@ index abc..def 100644
     fn test_filter_diff_paths_empty_diff() {
         let filtered = filter_diff_paths("", &["TASKS.md"]);
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_name_status_removes_tasks_md() {
+        let input = "M\tTASKS.md\nM\tsrc/lib.rs\nA\tsrc/new.rs";
+        let result = filter_name_status(input, &["TASKS.md"]);
+        assert!(!result.contains("TASKS.md"));
+        assert!(result.contains("src/lib.rs"));
+        assert!(result.contains("src/new.rs"));
+    }
+
+    #[test]
+    fn test_filter_name_status_only_tasks_md_returns_empty() {
+        let input = "M\tTASKS.md";
+        let result = filter_name_status(input, &["TASKS.md"]);
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_filter_name_status_empty_input() {
+        assert!(filter_name_status("", &["TASKS.md"]).is_empty());
     }
 
     #[test]
