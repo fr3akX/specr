@@ -500,7 +500,7 @@ impl ApiCodingAgent {
             .json(&body)
             .send()
             .await
-            .context("Failed to reach Anthropic API")?;
+            .with_context(|| "Failed to reach Anthropic API (check network/TLS)")?;
 
         let status = resp.status();
         if !status.is_success() {

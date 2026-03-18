@@ -145,9 +145,11 @@ impl LlmClient for AnthropicClient {
             serde_json::to_value(&request).context("Failed to serialize request")?;
         let request_value = wrap_system_for_oauth(&self.api_key, request_value);
 
-        let response = req.json(&request_value).send().await.context(
-            "Failed to send request to Anthropic API. Check your network connection and try again.",
-        )?;
+        let response = req
+            .json(&request_value)
+            .send()
+            .await
+            .with_context(|| "Failed to connect to Anthropic API (check network/TLS)")?;
 
         let status = response.status();
         if !status.is_success() {
