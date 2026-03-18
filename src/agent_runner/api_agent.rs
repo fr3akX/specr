@@ -29,69 +29,46 @@ fn tool_definitions() -> Value {
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file (relative to working directory or absolute)"}
+                    "path": {"type": "string", "description": "File path (relative to working directory or absolute)"}
                 },
                 "required": ["path"]
             }
         },
         {
             "name": "write_file",
-            "description": "Write content to a file, creating parent directories as needed. Overwrites if the file already exists.",
+            "description": "Write content to a file, creating parent directories as needed. Overwrites if the file exists.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the file"},
-                    "content": {"type": "string", "description": "Content to write"}
+                    "path": {"type": "string", "description": "File path"},
+                    "content": {"type": "string", "description": "Full content to write"}
                 },
                 "required": ["path", "content"]
             }
         },
         {
-            "name": "run_command",
-            "description": "Run a shell command in the working directory. Returns stdout and stderr. Use for cargo build/test/clippy, git operations, etc.",
+            "name": "edit_file",
+            "description": "Replace an exact string in a file with new text. Fails if the old_str is not found or matches more than once. Prefer this over write_file for targeted edits.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to run"},
+                    "path": {"type": "string", "description": "File path"},
+                    "old_str": {"type": "string", "description": "Exact string to find (must match exactly, including whitespace)"},
+                    "new_str": {"type": "string", "description": "Replacement string"}
+                },
+                "required": ["path", "old_str", "new_str"]
+            }
+        },
+        {
+            "name": "run_command",
+            "description": "Run a shell command in the working directory. Returns stdout and stderr. Use for cargo, git, find, grep, ls, and anything else.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run (via sh -c)"},
                     "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 120)"}
                 },
                 "required": ["command"]
-            }
-        },
-        {
-            "name": "list_dir",
-            "description": "List the contents of a directory.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Directory path (default: working directory)"}
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "search_files",
-            "description": "Search for a text pattern across files in a directory. Returns matching lines with file paths.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Text to search for"},
-                    "directory": {"type": "string", "description": "Directory to search in (default: working directory)"},
-                    "file_pattern": {"type": "string", "description": "Glob-like file extension filter, e.g. '*.rs' (optional)"}
-                },
-                "required": ["pattern"]
-            }
-        },
-        {
-            "name": "find_files",
-            "description": "Find files matching a name pattern in a directory tree.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_pattern": {"type": "string", "description": "Filename pattern (substring match)"},
-                    "directory": {"type": "string", "description": "Root directory to search (default: working directory)"}
-                },
-                "required": ["name_pattern"]
             }
         }
     ])
@@ -189,6 +166,42 @@ fn execute_write_file(workdir: &Path, input: &Value) -> String {
     }
 }
 
+fn execute_edit_file(workdir: &Path, input: &Value) -> String {
+    let path_str = match input.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return "Error: missing required parameter 'path'".to_string(),
+    };
+    let old_str = match input.get("old_str").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return "Error: missing required parameter 'old_str'".to_string(),
+    };
+    let new_str = match input.get("new_str").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return "Error: missing required parameter 'new_str'".to_string(),
+    };
+    let file_path = resolve_path(workdir, path_str);
+    let content = match std::fs::read_to_string(&file_path) {
+        Ok(c) => c,
+        Err(e) => return format!("Error reading {path_str}: {e}"),
+    };
+    let count = content.matches(old_str).count();
+    match count {
+        0 => format!("Error: old_str not found in {path_str}"),
+        1 => {
+            let updated = content.replacen(old_str, new_str, 1);
+            match std::fs::write(&file_path, &updated) {
+                Ok(()) => format!(
+                    "Edited {path_str}: replaced {} chars with {} chars",
+                    old_str.len(),
+                    new_str.len()
+                ),
+                Err(e) => format!("Error writing {path_str}: {e}"),
+            }
+        }
+        n => format!("Error: old_str matches {n} times in {path_str} — be more specific"),
+    }
+}
+
 async fn execute_run_command(workdir: &Path, input: &Value) -> String {
     let command = match input.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
@@ -232,165 +245,6 @@ async fn execute_run_command(workdir: &Path, input: &Value) -> String {
                 result.push_str(&format!("\n[exit {}]", exit));
             }
             result
-        }
-    }
-}
-
-fn execute_list_dir(workdir: &Path, input: &Value) -> String {
-    let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let path = resolve_path(workdir, path_str);
-    match std::fs::read_dir(&path) {
-        Err(e) => format!("Error reading directory {path_str}: {e}"),
-        Ok(entries) => {
-            let mut items: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        format!("{}/", name)
-                    } else {
-                        name
-                    }
-                })
-                .collect();
-            items.sort();
-            if items.is_empty() {
-                format!("{path_str}: (empty)")
-            } else {
-                format!("{path_str}:\n{}", items.join("\n"))
-            }
-        }
-    }
-}
-
-fn execute_search_files(workdir: &Path, input: &Value) -> String {
-    let pattern = match input.get("pattern").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return "Error: missing required parameter 'pattern'".to_string(),
-    };
-    let dir_str = input
-        .get("directory")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
-    let file_ext = input
-        .get("file_pattern")
-        .and_then(|v| v.as_str())
-        .and_then(|p| p.strip_prefix("*."))
-        .map(|s| s.to_string());
-
-    let search_dir = resolve_path(workdir, dir_str);
-    let mut matches: Vec<String> = Vec::new();
-    search_recursive(
-        &search_dir,
-        &search_dir,
-        pattern,
-        file_ext.as_deref(),
-        &mut matches,
-        0,
-    );
-
-    if matches.is_empty() {
-        format!("No matches for '{}' in {}", pattern, dir_str)
-    } else {
-        let truncated = matches.len() > 100;
-        let shown: Vec<_> = matches.into_iter().take(100).collect();
-        let mut out = shown.join("\n");
-        if truncated {
-            out.push_str("\n[...more matches not shown]");
-        }
-        out
-    }
-}
-
-fn search_recursive(
-    root: &Path,
-    dir: &Path,
-    pattern: &str,
-    ext_filter: Option<&str>,
-    matches: &mut Vec<String>,
-    depth: u32,
-) {
-    if depth > 8 {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Skip hidden dirs and common noise
-        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
-            continue;
-        }
-
-        if path.is_dir() {
-            search_recursive(root, &path, pattern, ext_filter, matches, depth + 1);
-        } else if path.is_file() {
-            if let Some(ext) = ext_filter {
-                if !name_str.ends_with(&format!(".{}", ext)) {
-                    continue;
-                }
-            }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path.strip_prefix(root).unwrap_or(&path);
-                for (i, line) in content.lines().enumerate() {
-                    if line.contains(pattern) {
-                        matches.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
-                        if matches.len() >= 200 {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn execute_find_files(workdir: &Path, input: &Value) -> String {
-    let pattern = match input.get("name_pattern").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return "Error: missing required parameter 'name_pattern'".to_string(),
-    };
-    let dir_str = input
-        .get("directory")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
-    let search_dir = resolve_path(workdir, dir_str);
-
-    let mut found: Vec<String> = Vec::new();
-    find_recursive(&search_dir, &search_dir, pattern, &mut found, 0);
-
-    if found.is_empty() {
-        format!("No files matching '{}' found", pattern)
-    } else {
-        found.join("\n")
-    }
-}
-
-fn find_recursive(root: &Path, dir: &Path, pattern: &str, found: &mut Vec<String>, depth: u32) {
-    if depth > 8 || found.len() >= 100 {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
-            continue;
-        }
-        if path.is_dir() {
-            find_recursive(root, &path, pattern, found, depth + 1);
-        } else if name_str.contains(pattern) {
-            let rel = path.strip_prefix(root).unwrap_or(&path);
-            found.push(rel.display().to_string());
         }
     }
 }
@@ -534,10 +388,8 @@ async fn execute_tool(name: &str, input: &Value, workdir: &Path) -> String {
     match name {
         "read_file" => execute_read_file(workdir, input),
         "write_file" => execute_write_file(workdir, input),
+        "edit_file" => execute_edit_file(workdir, input),
         "run_command" => execute_run_command(workdir, input).await,
-        "list_dir" => execute_list_dir(workdir, input),
-        "search_files" => execute_search_files(workdir, input),
-        "find_files" => execute_find_files(workdir, input),
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -620,36 +472,34 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_list_dir() {
+    fn test_execute_edit_file_ok() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("foo.rs"), "").unwrap();
-        std::fs::create_dir(tmp.path().join("bar")).unwrap();
-        let input = json!({});
-        let result = execute_list_dir(tmp.path(), &input);
-        assert!(result.contains("bar/"));
-        assert!(result.contains("foo.rs"));
+        std::fs::write(tmp.path().join("f.rs"), "fn foo() {}\nfn bar() {}").unwrap();
+        let input =
+            json!({"path": "f.rs", "old_str": "fn foo() {}", "new_str": "fn foo() { todo!() }"});
+        let result = execute_edit_file(tmp.path(), &input);
+        assert!(result.contains("Edited"), "got: {result}");
+        let content = std::fs::read_to_string(tmp.path().join("f.rs")).unwrap();
+        assert!(content.contains("fn foo() { todo!() }"));
+        assert!(content.contains("fn bar() {}"));
     }
 
     #[test]
-    fn test_execute_search_files() {
+    fn test_execute_edit_file_not_found() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("a.rs"), "fn main() {}\nfn helper() {}").unwrap();
-        std::fs::write(tmp.path().join("b.rs"), "fn test() {}").unwrap();
-        let input = json!({"pattern": "fn main"});
-        let result = execute_search_files(tmp.path(), &input);
-        assert!(result.contains("fn main"));
-        assert!(result.contains("a.rs"));
+        std::fs::write(tmp.path().join("f.rs"), "fn foo() {}").unwrap();
+        let input = json!({"path": "f.rs", "old_str": "fn missing() {}", "new_str": "x"});
+        let result = execute_edit_file(tmp.path(), &input);
+        assert!(result.contains("not found"), "got: {result}");
     }
 
     #[test]
-    fn test_execute_find_files() {
+    fn test_execute_edit_file_multiple_matches() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("config.toml"), "").unwrap();
-        std::fs::write(tmp.path().join("main.rs"), "").unwrap();
-        let input = json!({"name_pattern": ".toml"});
-        let result = execute_find_files(tmp.path(), &input);
-        assert!(result.contains("config.toml"));
-        assert!(!result.contains("main.rs"));
+        std::fs::write(tmp.path().join("f.rs"), "x\nx\nx").unwrap();
+        let input = json!({"path": "f.rs", "old_str": "x", "new_str": "y"});
+        let result = execute_edit_file(tmp.path(), &input);
+        assert!(result.contains("matches 3 times"), "got: {result}");
     }
 
     #[test]
