@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::llm::anthropic::apply_auth_headers;
+use crate::llm::anthropic::{apply_auth_headers, wrap_system_for_oauth};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MAX_FILE_READ_BYTES: usize = 128 * 1024; // 128 KB
@@ -494,9 +494,10 @@ impl ApiCodingAgent {
             .header("content-type", "application/json");
 
         let req = apply_auth_headers(req, &self.api_key);
+        let body = wrap_system_for_oauth(&self.api_key, body.clone());
 
         let resp = req
-            .json(body)
+            .json(&body)
             .send()
             .await
             .context("Failed to reach Anthropic API")?;

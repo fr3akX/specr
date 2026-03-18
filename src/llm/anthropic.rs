@@ -11,6 +11,32 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 // looks like it comes from Claude Code CLI — specific beta headers + user-agent.
 const CLAUDE_CODE_VERSION: &str = "2.1.77";
 
+/// For OAuth tokens, the system field must be an array of content blocks,
+/// with a mandatory Claude Code identity prepended. Without it Anthropic
+/// returns 400 invalid_request_error.
+pub(crate) fn wrap_system_for_oauth(
+    api_key: &str,
+    mut body: serde_json::Value,
+) -> serde_json::Value {
+    if !api_key.starts_with("sk-ant-oat") {
+        return body;
+    }
+    let system_text = body
+        .get("system")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut blocks = vec![serde_json::json!({
+        "type": "text",
+        "text": "You are Claude Code, Anthropic's official CLI for Claude."
+    })];
+    if !system_text.is_empty() {
+        blocks.push(serde_json::json!({"type": "text", "text": system_text}));
+    }
+    body["system"] = serde_json::json!(blocks);
+    body
+}
+
 /// Apply auth headers to a reqwest RequestBuilder.
 /// - API keys (sk-ant-api*): standard x-api-key header
 /// - OAuth tokens (sk-ant-oat*): Bearer auth + Claude Code identity headers
@@ -113,7 +139,13 @@ impl LlmClient for AnthropicClient {
 
         req = apply_auth_headers(req, &self.api_key);
 
-        let response = req.json(&request).send().await.context(
+        // OAuth tokens require system as content blocks with a mandatory
+        // Claude Code identity block prepended — plain string system is rejected.
+        let request_value =
+            serde_json::to_value(&request).context("Failed to serialize request")?;
+        let request_value = wrap_system_for_oauth(&self.api_key, request_value);
+
+        let response = req.json(&request_value).send().await.context(
             "Failed to send request to Anthropic API. Check your network connection and try again.",
         )?;
 
