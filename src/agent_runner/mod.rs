@@ -621,7 +621,8 @@ do not rewrite entire files just to change a few lines.\n\
 4. Run `cargo build` to confirm it compiles.\n\
 5. Run `cargo test` — all tests must pass.\n\
 6. Run `cargo clippy -- -D warnings` — must be clean.\n\
-7. Commit: `git add -A && git commit -m \"task NNN: short description\"`\n\
+7. Stage only files you modified: `git add -u && git add <any-new-files-you-created>`\n\
+8. Commit: `git commit -m \"task NNN: short description\"`\n\
 \n\
 ## Quality rules\n\
 - No `unwrap()` in production code paths — use `?` or explicit error handling.\n\

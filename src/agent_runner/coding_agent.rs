@@ -27,7 +27,7 @@ impl CodingAgent {
              Implement exactly what is described. Stay within the scope defined in \"What NOT to change\".\n\
              When done:\n\
              1. Run: cargo test && cargo clippy -- -D warnings\n\
-             2. Stage and commit all changes: git add -A && git commit -m \"{commit}\"",
+             2. Stage modified files and commit: git add -u && git add <any-new-files> && git commit -m \"{commit}\"",
             id = task.id,
             name = task.name,
             spec = spec_content,
@@ -51,7 +51,7 @@ impl CodingAgent {
              Fix all critical issues listed above. Stay within the scope defined in \"What NOT to change\".\n\
              When done:\n\
              1. Run: cargo test && cargo clippy -- -D warnings\n\
-             2. Stage and commit all changes: git add -A && git commit -m \"task {id}: {name} (retry)\"",
+             2. Stage modified files and commit: git add -u && git add <any-new-files> && git commit -m \"task {id}: {name} (retry)\"",
             id = task.id,
             name = task.name,
             spec = spec_content,
