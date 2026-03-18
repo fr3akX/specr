@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use crate::llm::anthropic::apply_auth_headers;
+
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MAX_FILE_READ_BYTES: usize = 128 * 1024; // 128 KB
 
@@ -494,17 +496,13 @@ impl ApiCodingAgent {
     }
 
     async fn call_api(&self, body: &Value) -> Result<ApiResponse> {
-        let mut req = self
+        let req = self
             .http
             .post(ANTHROPIC_API_URL)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
 
-        if self.api_key.starts_with("sk-ant-oat") {
-            req = req.header("Authorization", format!("Bearer {}", self.api_key));
-        } else {
-            req = req.header("x-api-key", &self.api_key);
-        }
+        let req = apply_auth_headers(req, &self.api_key);
 
         let resp = req
             .json(body)

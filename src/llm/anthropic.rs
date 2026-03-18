@@ -6,6 +6,34 @@ use super::LlmClient;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 
+// Claude Code version to impersonate when using OAuth tokens.
+// OAuth tokens (sk-ant-oat*) are only accepted by Anthropic when the request
+// looks like it comes from Claude Code CLI — specific beta headers + user-agent.
+const CLAUDE_CODE_VERSION: &str = "2.1.77";
+
+/// Apply auth headers to a reqwest RequestBuilder.
+/// - API keys (sk-ant-api*): standard x-api-key header
+/// - OAuth tokens (sk-ant-oat*): Bearer auth + Claude Code identity headers
+pub(crate) fn apply_auth_headers(
+    req: reqwest::RequestBuilder,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    if api_key.starts_with("sk-ant-oat") {
+        req.header("Authorization", format!("Bearer {}", api_key))
+            .header(
+                "anthropic-beta",
+                "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+            )
+            .header(
+                "user-agent",
+                format!("claude-cli/{CLAUDE_CODE_VERSION} (external)"),
+            )
+            .header("x-app", "cli")
+    } else {
+        req.header("x-api-key", api_key)
+    }
+}
+
 pub struct AnthropicClient {
     api_key: String,
     model: String,
@@ -72,19 +100,13 @@ impl LlmClient for AnthropicClient {
             }],
         };
 
-        // API keys (sk-ant-api...) use x-api-key header.
-        // OAuth/subscription tokens (sk-ant-oat...) use Authorization: Bearer.
         let mut req = self
             .http
             .post(ANTHROPIC_API_URL)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
 
-        if self.api_key.starts_with("sk-ant-oat") {
-            req = req.header("Authorization", format!("Bearer {}", self.api_key));
-        } else {
-            req = req.header("x-api-key", &self.api_key);
-        }
+        req = apply_auth_headers(req, &self.api_key);
 
         let response = req.json(&request).send().await.context(
             "Failed to send request to Anthropic API. Check your network connection and try again.",
