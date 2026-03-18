@@ -387,12 +387,24 @@ async fn run_single_task(
             let system = API_AGENT_SYSTEM;
             let prompt = match retry_findings.as_deref() {
                 Some(findings) => {
-                    CodingAgent::build_retry_prompt(task, spec_content, &task_detail, findings)
+                    let already_done = already_committed_summary(workdir, default_branch).await;
+                    CodingAgent::build_retry_prompt(
+                        task,
+                        spec_content,
+                        &task_detail,
+                        findings,
+                        &already_done,
+                    )
                 }
                 None => CodingAgent::build_prompt(task, spec_content, &task_detail),
             };
             api_agent.run(system, &prompt, workdir).await?;
         } else {
+            let already_done = if retry_findings.is_some() {
+                already_committed_summary(workdir, default_branch).await
+            } else {
+                String::new()
+            };
             agent
                 .run(
                     task,
@@ -400,6 +412,7 @@ async fn run_single_task(
                     &task_detail,
                     workdir,
                     retry_findings.as_deref(),
+                    &already_done,
                 )
                 .await?;
         }
@@ -587,6 +600,40 @@ async fn finalize_task_done(
         task.id.bold()
     );
     Ok(())
+}
+
+/// Build a summary of what has been committed on the task branch so far.
+/// Used in retry prompts so the agent knows what's already done.
+async fn already_committed_summary(workdir: &Path, default_branch: &str) -> String {
+    let log = git_command(
+        workdir,
+        &["log", "--oneline", &format!("{}..HEAD", default_branch)],
+    )
+    .await
+    .unwrap_or_default();
+
+    let stat = git_command(
+        workdir,
+        &["diff", "--stat", &format!("{}..HEAD", default_branch)],
+    )
+    .await
+    .unwrap_or_default();
+
+    if log.is_empty() && stat.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    if !log.is_empty() {
+        out.push_str("Commits:\n");
+        out.push_str(&log);
+        out.push('\n');
+    }
+    if !stat.is_empty() {
+        out.push_str("\nFiles changed:\n");
+        out.push_str(&stat);
+    }
+    out
 }
 
 /// Filter lines from `git diff --name-status` output, excluding paths that

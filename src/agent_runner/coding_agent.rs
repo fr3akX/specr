@@ -37,18 +37,31 @@ impl CodingAgent {
     }
 
     /// Build the prompt for a retry with review findings.
+    /// `already_done` is a summary of what has been committed so far (git log/diff --stat).
     pub fn build_retry_prompt(
         task: &Task,
         spec_content: &str,
         task_detail: &str,
         findings: &str,
+        already_done: &str,
     ) -> String {
+        let done_section = if already_done.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "## Already committed on this branch\n\
+                 The following work was done in previous iterations — DO NOT redo it:\n\n\
+                 {already_done}\n\n"
+            )
+        };
         format!(
             "You are implementing task {id}: {name}\n\n\
              SPEC.md:\n{spec}\n\n\
              Task details:\n{detail}\n\n\
-             The previous implementation was reviewed and had issues:\n\n{findings}\n\n\
-             Fix all critical issues listed above. Stay within the scope defined in \"What NOT to change\".\n\
+             {done}\
+             ## Review findings — fix only these remaining issues\n\n\
+             {findings}\n\n\
+             Focus on what is still missing. Build on existing work — do not rewrite what is already committed.\n\
              When done:\n\
              1. Run: cargo test && cargo clippy -- -D warnings\n\
              2. Stage modified files and commit: git add -u && git add <any-new-files> && git commit -m \"task {id}: {name} (retry)\"",
@@ -56,6 +69,7 @@ impl CodingAgent {
             name = task.name,
             spec = spec_content,
             detail = task_detail,
+            done = done_section,
             findings = findings,
         )
     }
@@ -69,9 +83,12 @@ impl CodingAgent {
         task_detail: &str,
         workdir: &Path,
         retry_findings: Option<&str>,
+        already_done: &str,
     ) -> Result<()> {
         let prompt = match retry_findings {
-            Some(findings) => Self::build_retry_prompt(task, spec_content, task_detail, findings),
+            Some(findings) => {
+                Self::build_retry_prompt(task, spec_content, task_detail, findings, already_done)
+            }
             None => Self::build_prompt(task, spec_content, task_detail),
         };
 
@@ -190,11 +207,12 @@ mod tests {
             "spec content",
             "task detail",
             "Critical: missing error handling",
+            "Commits:\nabc123 add tests",
         );
         assert!(prompt.contains("task 001: Scaffold project"));
-        assert!(prompt.contains("previous implementation was reviewed"));
+        assert!(prompt.contains("Review findings"));
         assert!(prompt.contains("Critical: missing error handling"));
-        assert!(prompt.contains("Fix all critical issues"));
+        assert!(prompt.contains("Already committed"));
     }
 
     #[test]

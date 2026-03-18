@@ -54,7 +54,7 @@ pub struct SpecConfig {
 }
 
 fn default_max_loop_iterations() -> u32 {
-    5
+    10
 }
 
 fn default_llm_timeout_seconds() -> u64 {
