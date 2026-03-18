@@ -510,8 +510,16 @@ impl ApiCodingAgent {
             // Extract message from JSON error if possible
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
-                .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-                .unwrap_or(body_text);
+                .and_then(|v| {
+                    let e = v.get("error")?;
+                    let m = e.get("message")?.as_str()?;
+                    if m.len() > 3 {
+                        Some(m.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| body_text.clone());
             anyhow::bail!("Anthropic API error ({}): {}", status, msg);
         }
 

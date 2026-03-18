@@ -19,11 +19,10 @@ pub(crate) fn apply_auth_headers(
     api_key: &str,
 ) -> reqwest::RequestBuilder {
     if api_key.starts_with("sk-ant-oat") {
+        // OAuth tokens require Claude Code identity headers.
+        // Note: fine-grained-tool-streaming is omitted — we use non-streaming requests.
         req.header("Authorization", format!("Bearer {}", api_key))
-            .header(
-                "anthropic-beta",
-                "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-            )
+            .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
             .header(
                 "user-agent",
                 format!("claude-cli/{CLAUDE_CODE_VERSION} (external)"),
@@ -76,14 +75,20 @@ struct ContentBlock {
 
 /// Extracts error details from an Anthropic API error response body.
 fn format_api_error(status: reqwest::StatusCode, body: &str) -> String {
-    // Try to parse as JSON for a cleaner message
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(error) = json.get("error") {
-            if let Some(msg) = error.get("message").and_then(|m| m.as_str()) {
-                return format!("Anthropic API error ({}): {}", status, msg);
+            let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let kind = error
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("unknown");
+            // If message is empty or suspiciously short, include the full body
+            if msg.len() > 3 {
+                return format!("Anthropic API error ({} {}): {}", status, kind, msg);
             }
         }
     }
+    // Fallback: show full body so we can diagnose
     format!("Anthropic API error ({}): {}", status, body)
 }
 
