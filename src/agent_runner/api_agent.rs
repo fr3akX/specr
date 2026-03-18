@@ -103,10 +103,19 @@ enum ContentBlock {
     },
 }
 
+#[derive(Deserialize, Debug, Default)]
+struct Usage {
+    input_tokens: u32,
+    #[allow(dead_code)]
+    output_tokens: u32,
+}
+
 #[derive(Deserialize, Debug)]
 struct ApiResponse {
     content: Vec<ContentBlock>,
     stop_reason: Option<String>,
+    #[serde(default)]
+    usage: Usage,
 }
 
 // ─── Tool execution ───────────────────────────────────────────────────────────
@@ -294,6 +303,21 @@ impl ApiCodingAgent {
 
             let response = self.call_api(&request).await?;
 
+            // Show token usage
+            let input_tokens = response.usage.input_tokens;
+            println!(
+                "{}",
+                format!("  [tokens: {}K in]", input_tokens / 1000).dimmed()
+            );
+
+            // Compact context if approaching the limit (threshold: 150K input tokens).
+            // Keep messages[0] (original task) + last 4 messages; summarize everything in between.
+            if input_tokens > 150_000 && messages.len() > 6 {
+                println!("{}", "  [context >150K tokens — compacting...]".yellow());
+                messages = self.compact_context(system, &messages).await;
+                println!("{}", "  [compaction done]".dimmed());
+            }
+
             // Print any text blocks
             for block in &response.content {
                 if let ContentBlock::Text { text } = block {
@@ -347,6 +371,119 @@ impl ApiCodingAgent {
         }
 
         Ok(())
+    }
+
+    // Compact conversation context by summarising middle turns.
+    // Keeps messages[0] (original task prompt) + last 4 messages verbatim.
+    // Everything in between is sent to the LLM for summarisation.
+    async fn compact_context(&self, system: &str, messages: &[Message]) -> Vec<Message> {
+        if messages.len() <= 6 {
+            return messages.to_vec();
+        }
+
+        // Tail: last 4 messages kept verbatim (2 turns = assistant + tool_results each)
+        let tail_start = messages.len() - 4;
+        let head = &messages[0..1]; // original task
+        let middle = &messages[1..tail_start];
+        let tail = &messages[tail_start..];
+
+        // Serialize middle turns to text for the summary prompt
+        let mut history_text = String::new();
+        for msg in middle {
+            match msg {
+                Message::Assistant { content } => {
+                    for block in content {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                history_text.push_str(&format!(
+                                    "ASSISTANT: {text}
+"
+                                ));
+                            }
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                history_text.push_str(&format!(
+                                    "TOOL CALL: {name}({})
+",
+                                    summarize_input(input)
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Message::User { content } => {
+                    for block in content {
+                        if let ContentBlock::ToolResult { content, .. } = block {
+                            let preview = if content.len() > 300 {
+                                format!("{}...[truncated]", &content[..300])
+                            } else {
+                                content.clone()
+                            };
+                            history_text.push_str(&format!(
+                                "TOOL RESULT: {preview}
+"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let summary_prompt = format!(
+            "You are summarizing the progress of a coding agent session.
+             The agent is implementing a software task. Below is the conversation history              (tool calls and results) from the middle of the session.
+
+             Create a concise summary (500-800 words) that captures:
+             - What files were read and their key contents
+             - What changes were made and to which files
+             - What commands were run and their outcomes
+             - Current state: what is done, what still needs doing
+
+             Be specific about file paths and code details.
+
+             HISTORY:
+{history_text}"
+        );
+
+        let summary_req = json!({
+            "model": self.model,
+            "max_tokens": 1024,
+            "system": system,
+            "messages": [{"role": "user", "content": summary_prompt}]
+        });
+
+        let summary_text = match self.call_api(&summary_req).await {
+            Ok(resp) => resp
+                .content
+                .into_iter()
+                .filter_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(e) => {
+                eprintln!("  [compaction failed: {e} — keeping full context]");
+                return messages.to_vec();
+            }
+        };
+
+        // Rebuild: [original_task, summary, ...tail]
+        let mut compacted = head.to_vec();
+        compacted.push(Message::User {
+            content: vec![ContentBlock::Text {
+                text: format!(
+                    "[CONTEXT SUMMARY — earlier turns compacted to save context]
+
+{summary_text}"
+                ),
+            }],
+        });
+        compacted.extend_from_slice(tail);
+        compacted
     }
 
     async fn call_api(&self, body: &Value) -> Result<ApiResponse> {
