@@ -51,6 +51,9 @@ enum Commands {
         /// Run continuously until all tasks are done (or a failure occurs)
         #[arg(long)]
         all: bool,
+        /// Number of parallel task workers. Overrides config.agent.parallel_jobs.
+        #[arg(long)]
+        jobs: Option<u32>,
     },
     /// Start Telegram bot polling loop
     Bot,
@@ -94,7 +97,7 @@ async fn main() -> Result<()> {
             let client = llm::create_client(&config, &api_key)?;
             task_generator::split(&config, client.as_ref(), &task).await?;
         }
-        Commands::Run { task, all } => {
+        Commands::Run { task, all, jobs } => {
             let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             let review_api_key = config::resolve_review_api_key(&config)?;
@@ -105,6 +108,7 @@ async fn main() -> Result<()> {
                 review_client.as_ref(),
                 task.as_deref(),
                 all,
+                jobs,
             )
             .await?;
         }

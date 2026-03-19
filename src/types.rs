@@ -109,6 +109,23 @@ impl Task {
         format!("task/{}-{}", id, slug)
     }
 
+    /// Minimal Task stub used when we only have an ID (e.g. coordinator fallback).
+    pub fn default_with_id(id: &str) -> Self {
+        Task {
+            id: id.to_string(),
+            name: id.to_string(),
+            size: crate::types::TaskSize::S,
+            status: crate::types::TaskStatus::Open,
+            depends_on: vec![],
+            done_when: String::new(),
+            scope: String::new(),
+            files_to_touch: vec![],
+            not_to_change: vec![],
+            branch: format!("task/{id}"),
+            interface: None,
+        }
+    }
+
     /// Whether this task has a detail file (M and L tasks).
     pub fn has_detail_file(&self) -> bool {
         matches!(self.size, TaskSize::M | TaskSize::L)

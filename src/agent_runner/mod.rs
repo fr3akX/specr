@@ -1,5 +1,6 @@
 pub mod api_agent;
 pub mod coding_agent;
+pub mod coordinator;
 pub mod loop_controller;
 pub mod resolver;
 pub mod review;
@@ -58,9 +59,13 @@ struct RunCtx<'a> {
     review_llm: &'a dyn LlmClient,
     notifier: &'a TelegramNotifier,
     default_branch: &'a str,
+    /// When true, skip TASKS.md reads/writes. The coordinator manages TASKS.md
+    /// externally in parallel mode to avoid concurrent write races.
+    skip_tasks_md: bool,
 }
 
 /// - `run_all = true`: loop through all parallel groups until all tasks done or a failure stops the run.
+/// - `jobs > 1`: parallel coordinator mode.
 /// - Default: run the next parallel group, then exit.
 pub async fn run(
     config: &Config,
@@ -68,6 +73,7 @@ pub async fn run(
     review_llm: &dyn LlmClient,
     task_id: Option<&str>,
     run_all: bool,
+    jobs: Option<u32>,
 ) -> Result<()> {
     let workdir = std::env::current_dir()?;
     let spec_content = store::read_spec(&workdir)?;
@@ -80,12 +86,39 @@ pub async fn run(
         default_branch.dimmed()
     );
 
+    // Parallel coordinator mode: --jobs N overrides config, both override default of 1
+    let effective_jobs = jobs.unwrap_or(config.agent.parallel_jobs);
+    if run_all && task_id.is_none() && effective_jobs > 1 {
+        use std::sync::Arc;
+        // Wrap clients in Arc for tokio::spawn
+        // We need Arc<dyn LlmClient> — create new clients from config since we can't
+        // clone trait objects. We pass the same underlying config/key.
+        let api_key = crate::config::resolve_api_key_optional(config).unwrap_or_default();
+        let review_api_key = crate::config::resolve_review_api_key(config).unwrap_or_default();
+        let llm_arc: Arc<dyn LlmClient> = Arc::from(crate::llm::create_client(config, &api_key)?);
+        let review_arc: Arc<dyn LlmClient> =
+            Arc::from(crate::llm::create_review_client(config, &review_api_key)?);
+
+        return coordinator::run_parallel(
+            Arc::new(config.clone()),
+            llm_arc,
+            review_arc,
+            notifier,
+            workdir,
+            spec_content,
+            effective_jobs as usize,
+            default_branch,
+        )
+        .await;
+    }
+
     let ctx = RunCtx {
         config,
         llm,
         review_llm,
         notifier: &notifier,
         default_branch: &default_branch,
+        skip_tasks_md: false,
     };
 
     // --task: run one specific task, ignore --all
@@ -263,18 +296,21 @@ async fn run_single_task(
     // a. Mark as in-progress and commit TASKS.md to the default branch.
     // TASKS.md tracks global state and must be committed before any branch switch,
     // otherwise git refuses to checkout due to local modifications.
-    store::update_task_status(workdir, &task.id, TaskStatus::InProgress)?;
-    git_command(workdir, &["add", "TASKS.md"]).await.ok();
-    git_command(
-        workdir,
-        &[
-            "commit",
-            "-m",
-            &format!("chore: mark task {} as in-progress", task.id),
-        ],
-    )
-    .await
-    .ok(); // ok() — no-op if nothing changed (already committed)
+    // In parallel mode (skip_tasks_md=true) the coordinator handles this externally.
+    if !ctx.skip_tasks_md {
+        store::update_task_status(workdir, &task.id, TaskStatus::InProgress)?;
+        git_command(workdir, &["add", "TASKS.md"]).await.ok();
+        git_command(
+            workdir,
+            &[
+                "commit",
+                "-m",
+                &format!("chore: mark task {} as in-progress", task.id),
+            ],
+        )
+        .await
+        .ok(); // ok() — no-op if nothing changed (already committed)
+    }
 
     // b. Create or resume git branch
     let branch = &task.branch;
@@ -332,18 +368,20 @@ async fn run_single_task(
             git_command(workdir, &["checkout", default_branch])
                 .await
                 .ok();
-            store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
-            git_command(workdir, &["add", "TASKS.md"]).await.ok();
-            git_command(
-                workdir,
-                &[
-                    "commit",
-                    "-m",
-                    &format!("chore: mark task {} as failed", task.id),
-                ],
-            )
-            .await
-            .ok();
+            if !ctx.skip_tasks_md {
+                store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
+                git_command(workdir, &["add", "TASKS.md"]).await.ok();
+                git_command(
+                    workdir,
+                    &[
+                        "commit",
+                        "-m",
+                        &format!("chore: mark task {} as failed", task.id),
+                    ],
+                )
+                .await
+                .ok();
+            }
             notifier
                 .send(&format!(
                     "❌ Task {} failed after {} iterations (limit: {})",
@@ -559,6 +597,31 @@ async fn run_single_task(
     }
 }
 
+/// Public entry point for parallel coordinator workers.
+/// Runs a task in a separate worktree, skipping TASKS.md writes (coordinator owns those).
+/// Used by the coordinator module to run workers in isolation.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_single_task_in_worktree(
+    config: &Config,
+    llm: &dyn LlmClient,
+    review_llm: &dyn LlmClient,
+    notifier: &TelegramNotifier,
+    task: &Task,
+    spec_content: &str,
+    workdir: &Path,
+    default_branch: &str,
+) -> Result<()> {
+    let ctx = RunCtx {
+        config,
+        llm,
+        review_llm,
+        notifier,
+        default_branch,
+        skip_tasks_md: true, // Coordinator manages TASKS.md externally
+    };
+    run_single_task(&ctx, task, spec_content, workdir).await
+}
+
 /// Remove diff hunks for specified file paths from a unified diff string.
 /// Strips everything from `diff --git a/<path>` to the next `diff --git` header.
 async fn finalize_task_done(
@@ -574,20 +637,24 @@ async fn finalize_task_done(
         git_command(workdir, &["merge", "--abort"]).await.ok();
         anyhow::bail!("merge failed (non-TASKS.md conflict): {}", e);
     }
-    git_command(workdir, &["branch", "-d", branch]).await.ok();
+    if !ctx.skip_tasks_md {
+        git_command(workdir, &["branch", "-d", branch]).await.ok();
+    }
 
-    store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
-    git_command(workdir, &["add", "TASKS.md"]).await.ok();
-    git_command(
-        workdir,
-        &[
-            "commit",
-            "-m",
-            &format!("chore: mark task {} as done", task.id),
-        ],
-    )
-    .await
-    .ok();
+    if !ctx.skip_tasks_md {
+        store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
+        git_command(workdir, &["add", "TASKS.md"]).await.ok();
+        git_command(
+            workdir,
+            &[
+                "commit",
+                "-m",
+                &format!("chore: mark task {} as done", task.id),
+            ],
+        )
+        .await
+        .ok();
+    }
 
     ctx.notifier
         .send(&format!("✅ Task {} completed: {}", task.id, task.name))

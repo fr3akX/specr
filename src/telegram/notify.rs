@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 
 /// Sends notifications via the Telegram Bot API.
+#[derive(Clone)]
 pub struct TelegramNotifier {
     bot_token: Option<String>,
     chat_id: Option<String>,

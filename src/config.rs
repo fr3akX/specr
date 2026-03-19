@@ -76,10 +76,26 @@ pub struct AgentConfig {
     /// Max tool-use turns for the "api-agent" runner. Default: 30.
     #[serde(default = "default_max_agent_turns")]
     pub max_agent_turns: u32,
+    /// Number of parallel task workers. 1 = sequential (default). >1 = coordinator mode.
+    #[serde(default = "default_parallel_jobs")]
+    pub parallel_jobs: u32,
+    /// Base directory for git worktrees in parallel mode. Default: OS temp dir.
+    #[serde(default)]
+    pub worktree_base: String,
+    /// Test command to run after merging a task branch. Default: auto-detected.
+    #[serde(default)]
+    pub test_command: String,
+    /// Use LLM to auto-resolve merge conflicts and failing integration tests. Default: true.
+    #[serde(default = "default_true")]
+    pub resolve_conflicts: bool,
 }
 
 fn default_max_agent_turns() -> u32 {
     30
+}
+
+fn default_parallel_jobs() -> u32 {
+    1
 }
 
 impl Default for AgentConfig {
@@ -90,6 +106,10 @@ impl Default for AgentConfig {
             stream_output: true,
             show_reasoning: true,
             max_agent_turns: default_max_agent_turns(),
+            parallel_jobs: default_parallel_jobs(),
+            worktree_base: String::new(),
+            test_command: String::new(),
+            resolve_conflicts: true,
         }
     }
 }
