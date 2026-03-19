@@ -73,11 +73,34 @@ pub async fn worktree_add(repo_dir: &Path, path: &Path, branch: &str) -> Result<
         .is_ok();
 
     if branch_exists {
-        git_command(
+        // Try direct branch checkout into worktree.
+        // If the branch is already checked out in another worktree, git will refuse.
+        // In that case, create the worktree from the branch's commit (detached HEAD)
+        // and then reset to the branch so git tracks it normally.
+        let commit = git_command(repo_dir, &["rev-parse", branch]).await?;
+        let result = git_command(
             repo_dir,
             &["worktree", "add", &path.to_string_lossy(), branch],
         )
-        .await?;
+        .await;
+
+        if result.is_err() {
+            // Branch already used by another worktree — checkout the commit detached,
+            // then create/reset the branch inside the new worktree.
+            git_command(
+                repo_dir,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &path.to_string_lossy(),
+                    commit.trim(),
+                ],
+            )
+            .await?;
+            // Inside the worktree, create a local branch tracking the same commit.
+            git_command(path, &["checkout", "-B", branch]).await?;
+        }
     } else {
         git_command(
             repo_dir,

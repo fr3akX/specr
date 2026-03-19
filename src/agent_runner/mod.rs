@@ -365,9 +365,13 @@ async fn run_single_task(
         // Check iteration limit
         if let Err(e) = loop_ctrl.increment() {
             eprintln!("{} {} — preserving branch {}", "✖".bold().red(), e, branch);
-            git_command(workdir, &["checkout", default_branch])
-                .await
-                .ok();
+            // In parallel mode, do NOT checkout the default branch — it's already
+            // used by the main worktree and git will refuse. Just bail.
+            if !ctx.skip_tasks_md {
+                git_command(workdir, &["checkout", default_branch])
+                    .await
+                    .ok();
+            }
             if !ctx.skip_tasks_md {
                 store::update_task_status(workdir, &task.id, TaskStatus::Failed)?;
                 git_command(workdir, &["add", "TASKS.md"]).await.ok();
@@ -648,6 +652,20 @@ async fn finalize_task_done(
     task: &Task,
     branch: &str,
 ) -> Result<()> {
+    // In parallel/worktree mode the coordinator owns the merge-back.
+    // Workers must NOT checkout the default branch — git refuses if it's
+    // already checked out in the main workdir ("already used by worktree").
+    // Just return: the coordinator will fetch the branch and merge it.
+    if ctx.skip_tasks_md {
+        println!(
+            "\n{} Task {} complete on branch {} — handing off to coordinator\n",
+            "✔".bold().green(),
+            task.id.bold(),
+            branch.cyan()
+        );
+        return Ok(());
+    }
+
     let default_branch = ctx.default_branch;
 
     git_command(workdir, &["checkout", default_branch]).await?;
@@ -655,24 +673,20 @@ async fn finalize_task_done(
         git_command(workdir, &["merge", "--abort"]).await.ok();
         anyhow::bail!("merge failed (non-TASKS.md conflict): {}", e);
     }
-    if !ctx.skip_tasks_md {
-        git_command(workdir, &["branch", "-d", branch]).await.ok();
-    }
+    git_command(workdir, &["branch", "-d", branch]).await.ok();
 
-    if !ctx.skip_tasks_md {
-        store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
-        git_command(workdir, &["add", "TASKS.md"]).await.ok();
-        git_command(
-            workdir,
-            &[
-                "commit",
-                "-m",
-                &format!("chore: mark task {} as done", task.id),
-            ],
-        )
-        .await
-        .ok();
-    }
+    store::update_task_status(workdir, &task.id, TaskStatus::Done)?;
+    git_command(workdir, &["add", "TASKS.md"]).await.ok();
+    git_command(
+        workdir,
+        &[
+            "commit",
+            "-m",
+            &format!("chore: mark task {} as done", task.id),
+        ],
+    )
+    .await
+    .ok();
 
     ctx.notifier
         .send(&format!("✅ Task {} completed: {}", task.id, task.name))
