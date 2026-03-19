@@ -175,21 +175,42 @@ pub async fn run_test_command(dir: &Path, cmd: &str) -> Result<String> {
 /// Attempt a `git merge --no-ff <branch>` in `dir`.
 /// Returns `Ok(true)` if merged cleanly, `Ok(false)` if there are conflicts.
 pub async fn coordinator_merge(dir: &Path, branch: &str, default_branch: &str) -> Result<bool> {
+    use tokio::process::Command as TokioCommand;
+
     // Make sure we're on the default branch
     git_command(dir, &["checkout", default_branch]).await?;
 
-    let result = git_command(dir, &["merge", "--no-ff", "--no-edit", branch]).await;
-    match result {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("CONFLICT") || msg.contains("conflict") {
-                Ok(false) // conflict — caller decides what to do
-            } else {
-                Err(e)
-            }
-        }
+    // Run merge directly to capture both stdout and stderr without bailing on non-zero.
+    // git merge exits 1 on conflicts AND on genuine errors — we distinguish by checking
+    // for conflict markers in the working tree after a non-zero exit.
+    let output = TokioCommand::new("git")
+        .args(["merge", "--no-ff", "--no-edit", branch])
+        .current_dir(dir)
+        .output()
+        .await
+        .context("Failed to spawn git merge")?;
+
+    if output.status.success() {
+        return Ok(true);
     }
+
+    // Non-zero exit. Check if there are conflict markers in the working tree.
+    // git diff --name-only --diff-filter=U lists unmerged (conflicted) files.
+    let conflicted = git_command(dir, &["diff", "--name-only", "--diff-filter=U"]).await?;
+    if !conflicted.trim().is_empty() {
+        return Ok(false); // conflicts present — caller resolves
+    }
+
+    // No conflicted files but still failed — real error (e.g. branch doesn't exist,
+    // already in a merge state, etc.). Surface it.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    anyhow::bail!(
+        "git merge --no-ff --no-edit {} failed: {}\n{}",
+        branch,
+        stderr.trim(),
+        stdout.trim()
+    )
 }
 
 /// Collect files with conflict markers after a failed merge.
