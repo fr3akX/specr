@@ -339,15 +339,32 @@ pub async fn drift_with_io<R: BufRead, W: Write>(
     )?;
 
     // Step 2: Get git diff of SPEC.md
-    let git_ref = base_ref.unwrap_or("HEAD");
-    writeln!(writer, "Diffing SPEC.md against {}...", git_ref.dimmed())?;
+    // When no --base given, auto-detect: find the commit BEFORE the most recent
+    // change to SPEC.md, so committed spec changes are always picked up.
+    let git_ref;
+    let resolved_ref: String;
+    if let Some(r) = base_ref {
+        git_ref = r;
+    } else {
+        resolved_ref = detect_spec_base(&dir).await;
+        git_ref = &resolved_ref;
+    }
+    writeln!(
+        writer,
+        "Diffing SPEC.md against {} (auto)...",
+        git_ref.dimmed()
+    )?;
     let spec_diff = get_spec_diff(&dir, git_ref).await?;
 
     if spec_diff.trim().is_empty() {
         writeln!(
             writer,
             "{}",
-            "No changes detected in SPEC.md — nothing to do.".yellow()
+            format!(
+                "No changes detected in SPEC.md vs {} — try 'specr drift --base <ref>'.",
+                git_ref
+            )
+            .yellow()
         )?;
         return Ok(());
     }
@@ -540,6 +557,49 @@ pub async fn drift_with_io<R: BufRead, W: Write>(
     )?;
 
     Ok(())
+}
+
+/// Auto-detect the best base ref for diffing SPEC.md.
+///
+/// Strategy:
+/// 1. Find the most recent commit that touched SPEC.md (`git log -1 -- SPEC.md`)
+/// 2. Return that commit's parent (`<hash>^`) so the diff captures that change.
+/// 3. If SPEC.md has never been committed, or there's only one commit, fall back to
+///    `HEAD~1` (previous commit) then `HEAD` (uncommitted changes only).
+async fn detect_spec_base(dir: &Path) -> String {
+    use tokio::process::Command;
+
+    // Last commit that touched SPEC.md
+    let out = Command::new("git")
+        .args(["log", "-1", "--format=%H", "--", "SPEC.md"])
+        .current_dir(dir)
+        .output()
+        .await;
+
+    if let Ok(o) = out {
+        let hash = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if !hash.is_empty() {
+            // Return the parent of that commit
+            let parent_ref = format!("{hash}^");
+            // Verify the parent exists (fails if it's the very first commit)
+            let parent_ok = Command::new("git")
+                .args(["rev-parse", "--verify", &parent_ref])
+                .current_dir(dir)
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if parent_ok {
+                return parent_ref;
+            }
+            // First commit ever — diff from empty tree
+            return "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(); // git empty tree
+        }
+    }
+
+    // Fallback: previous commit
+    "HEAD~1".to_string()
 }
 
 /// Get the git diff of SPEC.md vs the given ref.
