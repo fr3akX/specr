@@ -31,6 +31,12 @@ enum Commands {
     Tasks,
     /// Open interactive TUI task board
     Status,
+    /// Generate tasks for spec changes (diff vs git ref)
+    Drift {
+        /// Git ref to diff against (default: HEAD)
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+    },
     /// Split a large (L) task into subtasks
     Split {
         /// Task ID to split (e.g., 003)
@@ -77,6 +83,11 @@ async fn main() -> Result<()> {
             let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             task_generator::run(&config, client.as_ref()).await?;
+        }
+        Commands::Drift { base } => {
+            let api_key = config::resolve_api_key_optional(&config)?;
+            let client = llm::create_client(&config, &api_key)?;
+            task_generator::drift(&config, client.as_ref(), Some(&base)).await?;
         }
         Commands::Split { task } => {
             let api_key = config::resolve_api_key_optional(&config)?;

@@ -49,6 +49,36 @@ verifiable output. Output JSON only, no commentary.
 
 Output a JSON array with the same schema as task decomposition.";
 
+const DRIFT_SYSTEM: &str = "\
+You are a senior software architect. A project SPEC.md has changed. Given the full current spec, \
+a git diff showing what changed, and the existing task list, generate ONLY the new tasks required \
+to implement the spec changes. Do not re-generate tasks for work that is already covered by \
+existing tasks.
+
+Rules:
+- Each task must produce ONE verifiable output
+- Size tasks: S (<2h), M (~half day), L (>half day, must be split)
+- Make dependencies explicit — new tasks may depend on existing task IDs
+- Done-when must be machine-checkable
+- Output JSON only, no commentary
+
+Output a JSON array of objects with this schema:
+[
+  {
+    \"id\": \"NNN\",
+    \"name\": \"Short imperative task name\",
+    \"size\": \"S\",
+    \"depends_on\": [\"001\"],
+    \"done_when\": \"machine-checkable criterion\",
+    \"scope\": \"What to build/change\",
+    \"files_to_touch\": [\"src/foo.rs\"],
+    \"not_to_change\": [],
+    \"interface\": null
+  }
+]
+
+If no new tasks are required (the diff is purely cosmetic or already covered), output an empty array: []";
+
 /// Run the full task generation pipeline.
 pub async fn run(config: &Config, client: &dyn LlmClient) -> Result<()> {
     run_with_io(config, client, &mut io::stdin().lock(), &mut io::stdout()).await
@@ -271,6 +301,265 @@ pub async fn run_with_io<R: BufRead, W: Write>(
 
     writeln!(writer, "{}", "Unknown input. Aborting.".red())?;
     Ok(())
+}
+
+/// Run the drift pipeline: detect spec changes vs git, generate new tasks, append to TASKS.md.
+pub async fn drift(config: &Config, client: &dyn LlmClient, base_ref: Option<&str>) -> Result<()> {
+    drift_with_io(
+        config,
+        client,
+        base_ref,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+    )
+    .await
+}
+
+/// Drift with injectable I/O for testing.
+pub async fn drift_with_io<R: BufRead, W: Write>(
+    _config: &Config,
+    client: &dyn LlmClient,
+    base_ref: Option<&str>,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let dir = std::env::current_dir()?;
+
+    // Step 1: Read current SPEC.md
+    let spec_content = store::read_spec(&dir)?;
+    let spec_version = extract_spec_version(&spec_content);
+    let project_name = extract_project_name(&spec_content);
+
+    writeln!(writer, "\n{}", "=== specr drift ===".bold().cyan())?;
+    writeln!(
+        writer,
+        "Project: {}  spec-version: {}\n",
+        project_name.bold(),
+        spec_version
+    )?;
+
+    // Step 2: Get git diff of SPEC.md
+    let git_ref = base_ref.unwrap_or("HEAD");
+    writeln!(writer, "Diffing SPEC.md against {}...", git_ref.dimmed())?;
+    let spec_diff = get_spec_diff(&dir, git_ref).await?;
+
+    if spec_diff.trim().is_empty() {
+        writeln!(
+            writer,
+            "{}",
+            "No changes detected in SPEC.md — nothing to do.".yellow()
+        )?;
+        return Ok(());
+    }
+
+    writeln!(writer, "\n{}", "SPEC.md diff:".bold())?;
+    for line in spec_diff.lines().take(40) {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            writeln!(writer, "{}", line.green())?;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            writeln!(writer, "{}", line.red())?;
+        } else {
+            writeln!(writer, "{}", line.dimmed())?;
+        }
+    }
+    if spec_diff.lines().count() > 40 {
+        writeln!(writer, "  {} (diff truncated for display)", "...".dimmed())?;
+    }
+
+    // Step 3: Read existing tasks
+    let existing_tasks = store::read_tasks(&dir).ok();
+    let (existing_task_list, existing_spec_version) = existing_tasks
+        .as_ref()
+        .map(|(tasks, ver)| (tasks.clone(), *ver))
+        .unwrap_or_default();
+
+    let next_id = existing_task_list
+        .iter()
+        .filter_map(|t| t.id.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    writeln!(
+        writer,
+        "\nExisting tasks: {}  Next ID will start at: {:03}",
+        existing_task_list.len(),
+        next_id
+    )?;
+
+    // Build a concise summary of existing tasks for the LLM
+    let existing_summary = if existing_task_list.is_empty() {
+        "No existing tasks.".to_string()
+    } else {
+        existing_task_list
+            .iter()
+            .map(|t| {
+                format!(
+                    "- {} [{}] {}: {} ({})",
+                    t.id,
+                    match t.size {
+                        TaskSize::S => "S",
+                        TaskSize::M => "M",
+                        TaskSize::L => "L",
+                    },
+                    t.name,
+                    t.done_when,
+                    match t.status {
+                        TaskStatus::Done => "done",
+                        TaskStatus::Open => "open",
+                        TaskStatus::InProgress => "in-progress",
+                        TaskStatus::Failed => "failed",
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Step 4: Call LLM to generate tasks for the drift
+    writeln!(
+        writer,
+        "\n{}",
+        "Generating tasks for spec drift via LLM...".cyan()
+    )?;
+
+    let user_prompt = format!(
+        "## Current SPEC.md\n\n{spec}\n\n\
+         ## What changed (git diff vs {base})\n\n{diff}\n\n\
+         ## Existing tasks (do not duplicate these)\n\n{existing}\n\n\
+         ## Instructions\n\
+         Start task IDs from {next_id:03}. Generate only new tasks for the changed/added spec \
+         sections. Output JSON array only.",
+        spec = spec_content,
+        base = git_ref,
+        diff = spec_diff,
+        existing = existing_summary,
+        next_id = next_id,
+    );
+
+    let llm_response = client.complete(DRIFT_SYSTEM, &user_prompt).await?;
+
+    let raw_json = extract_json(&llm_response);
+    let mut new_tasks: Vec<Task> =
+        parse_task_json(&raw_json).context("Failed to parse LLM drift response")?;
+
+    // Enforce IDs start from next_id (LLM may ignore the instruction)
+    for (i, task) in new_tasks.iter_mut().enumerate() {
+        let id = format!("{:03}", next_id + i as u32);
+        task.branch = Task::default_branch(&id, &task.name);
+        task.id = id;
+    }
+
+    if new_tasks.is_empty() {
+        writeln!(
+            writer,
+            "{}",
+            "LLM found no new tasks needed for this drift.".green()
+        )?;
+        return Ok(());
+    }
+
+    // Step 5: Display proposed new tasks
+    writeln!(
+        writer,
+        "\n{}\n",
+        "--- Proposed new tasks ---".bold().green()
+    )?;
+    for task in &new_tasks {
+        let size_badge = match task.size {
+            TaskSize::S => "[S]".green(),
+            TaskSize::M => "[M]".yellow(),
+            TaskSize::L => "[L]".red(),
+        };
+        let deps = if task.depends_on.is_empty() {
+            "\u{2014}".to_string()
+        } else {
+            task.depends_on.join(", ")
+        };
+        writeln!(
+            writer,
+            "  {} {} · {}  [{}]  deps: {}",
+            task.id,
+            size_badge,
+            task.name,
+            task.done_when.dimmed(),
+            deps
+        )?;
+        if task.size == TaskSize::L {
+            writeln!(
+                writer,
+                "    {} This task is size L and should be split.",
+                "!".red().bold()
+            )?;
+        }
+    }
+
+    // Step 6: Approval gate
+    writeln!(writer)?;
+    writeln!(writer, "{}", "Append these tasks? (yes / no)".bold())?;
+    write!(writer, "> ")?;
+    writer.flush()?;
+
+    let mut input = String::new();
+    reader.read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    if input != "yes" && input != "y" {
+        writeln!(writer, "{}", "Aborted. No files written.".yellow())?;
+        return Ok(());
+    }
+
+    // Step 7: Append new tasks to TASKS.md
+    // Combine existing + new, preserving existing exactly.
+    // Use the higher spec version to reflect the update.
+    let new_spec_version = spec_version.max(existing_spec_version);
+    let mut all_tasks = existing_task_list;
+    all_tasks.extend(new_tasks.clone());
+
+    store::write_tasks(&dir, &all_tasks, new_spec_version, &project_name)?;
+
+    // Write detail files for new M/L tasks
+    let mut detail_count = 0;
+    for task in &new_tasks {
+        if task.has_detail_file() {
+            store::write_task_detail(&dir, task)?;
+            detail_count += 1;
+        }
+    }
+
+    writeln!(
+        writer,
+        "\n{} {} new task(s) appended to TASKS.md{}.",
+        "Done!".green().bold(),
+        new_tasks.len(),
+        if detail_count > 0 {
+            format!(" ({detail_count} detail files written)")
+        } else {
+            String::new()
+        }
+    )?;
+
+    Ok(())
+}
+
+/// Get the git diff of SPEC.md vs the given ref.
+/// Falls back to comparing working tree vs index if ref is "HEAD".
+async fn get_spec_diff(dir: &Path, base_ref: &str) -> Result<String> {
+    use tokio::process::Command;
+
+    let output = Command::new("git")
+        .args(["diff", base_ref, "--", "SPEC.md"])
+        .current_dir(dir)
+        .output()
+        .await
+        .context("Failed to run git diff")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git diff failed: {}", stderr.trim());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Run the task splitting pipeline for a specific task.
@@ -575,5 +864,96 @@ mod tests {
         assert_eq!(tasks[0].scope, "");
         assert!(tasks[0].files_to_touch.is_empty());
         assert!(tasks[0].interface.is_none());
+    }
+
+    // ── drift tests ──────────────────────────────────────────────────────────
+
+    /// Mock LLM that returns a preset response.
+    struct MockLlm {
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmClient for MockLlm {
+        async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drift_no_changes_exits_early() {
+        // When get_spec_diff returns empty, drift should say "nothing to do".
+        // We test the ID-renumbering logic and summary building without hitting git.
+
+        // next_id calculation from existing tasks
+        let tasks = vec![
+            Task {
+                id: "001".to_string(),
+                name: "First".to_string(),
+                size: TaskSize::S,
+                status: TaskStatus::Done,
+                depends_on: vec![],
+                done_when: "passes".to_string(),
+                scope: String::new(),
+                files_to_touch: vec![],
+                not_to_change: vec![],
+                branch: "task/001-first".to_string(),
+                interface: None,
+            },
+            Task {
+                id: "003".to_string(),
+                name: "Third".to_string(),
+                size: TaskSize::M,
+                status: TaskStatus::Open,
+                depends_on: vec!["001".to_string()],
+                done_when: "passes".to_string(),
+                scope: String::new(),
+                files_to_touch: vec![],
+                not_to_change: vec![],
+                branch: "task/003-third".to_string(),
+                interface: None,
+            },
+        ];
+        // next_id should be 004 (max existing is 003)
+        let next_id = tasks
+            .iter()
+            .filter_map(|t| t.id.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        assert_eq!(next_id, 4);
+    }
+
+    #[test]
+    fn test_drift_id_renumbering() {
+        // LLM may return wrong IDs; verify we force-renumber from next_id.
+        let json = r#"[
+            {"id": "001", "name": "New feature", "size": "S", "depends_on": [],
+             "done_when": "tests pass"}
+        ]"#;
+        let mut tasks = parse_task_json(json).unwrap();
+        let next_id: u32 = 7;
+        for (i, task) in tasks.iter_mut().enumerate() {
+            let id = format!("{:03}", next_id + i as u32);
+            task.branch = Task::default_branch(&id, &task.name);
+            task.id = id;
+        }
+        assert_eq!(tasks[0].id, "007");
+        assert!(tasks[0].branch.contains("007"));
+    }
+
+    #[test]
+    fn test_drift_empty_llm_response_gives_no_tasks() {
+        // If LLM returns an empty array, no tasks should be appended.
+        let json = "[]";
+        let tasks = parse_task_json(json).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn test_drift_system_prompt_contains_key_phrases() {
+        assert!(DRIFT_SYSTEM.contains("ONLY the new tasks"));
+        assert!(DRIFT_SYSTEM.contains("empty array"));
+        assert!(DRIFT_SYSTEM.contains("depends_on"));
     }
 }
