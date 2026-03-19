@@ -223,6 +223,73 @@ async fn get_conflicted_files(dir: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+// ── Lockfile / generated-file helpers ───────────────────────────────────────
+
+/// Returns true if the file is a deterministically-generated lockfile that
+/// should be regenerated rather than LLM-merged.
+fn is_generated_lockfile(path: &str) -> bool {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    matches!(
+        name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "Pipfile.lock"
+            | "poetry.lock"
+            | "Gemfile.lock"
+            | "composer.lock"
+            | "go.sum"
+            | "flake.lock"
+    )
+}
+
+/// Resolve a lockfile conflict by regenerating it with the appropriate tool.
+/// Accepts `--ours` first (stable base), then regenerates.  Returns true on success.
+async fn resolve_lockfile(dir: &Path, path: &str) -> bool {
+    use tokio::process::Command as TokioCommand;
+
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    // Take our side to clear conflict markers so the tool can run
+    git_command(dir, &["checkout", "--ours", path]).await.ok();
+
+    let (cmd, args): (&str, &[&str]) = match name {
+        "Cargo.lock" => ("cargo", &["generate-lockfile"]),
+        "package-lock.json" => ("npm", &["install", "--package-lock-only"]),
+        "yarn.lock" => ("yarn", &["install", "--frozen-lockfile=false"]),
+        "pnpm-lock.yaml" => ("pnpm", &["install", "--lockfile-only"]),
+        "Pipfile.lock" => ("pipenv", &["lock"]),
+        "poetry.lock" => ("poetry", &["lock", "--no-update"]),
+        "go.sum" => ("go", &["mod", "tidy"]),
+        _ => {
+            // Unknown lockfile — just take --theirs and stage
+            git_command(dir, &["checkout", "--theirs", path]).await.ok();
+            git_command(dir, &["add", path]).await.ok();
+            return true;
+        }
+    };
+
+    let ok = TokioCommand::new(cmd)
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if ok {
+        git_command(dir, &["add", path]).await.ok();
+    }
+    ok
+}
+
 // ── LLM conflict resolution ─────────────────────────────────────────────────
 
 /// Resolve merge conflicts in `dir` using the LLM.
@@ -243,12 +310,41 @@ async fn resolve_conflicts(dir: &Path, task: &Task, llm: &dyn LlmClient, test_cm
     }
 
     eprintln!(
-        "{} Resolving {} conflict(s) with LLM...",
+        "{} Resolving {} conflict(s)...",
         "⚙".cyan(),
         conflicted.len()
     );
 
+    // Pre-pass: handle generated/lockfiles by regenerating them instead of LLM resolution.
+    // These files are deterministically produced by tooling; LLM text merging is wrong for them.
+    let mut remaining: Vec<String> = Vec::new();
     for file_path in &conflicted {
+        if is_generated_lockfile(file_path) {
+            eprintln!(
+                "{} {} is a generated lockfile — regenerating...",
+                "⚙".cyan(),
+                file_path
+            );
+            if resolve_lockfile(dir, file_path).await {
+                eprintln!("{} {} regenerated OK", "✔".green(), file_path);
+            } else {
+                eprintln!(
+                    "{} {} regeneration failed — falling back to --theirs",
+                    "⚠".yellow(),
+                    file_path
+                );
+                // Last resort: take the incoming side so the merge can proceed
+                git_command(dir, &["checkout", "--theirs", file_path])
+                    .await
+                    .ok();
+                git_command(dir, &["add", file_path]).await.ok();
+            }
+        } else {
+            remaining.push(file_path.clone());
+        }
+    }
+
+    for file_path in &remaining {
         let full_path = dir.join(file_path);
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
