@@ -1,5 +1,6 @@
 mod agent_runner;
 mod config;
+mod instructions;
 mod llm;
 mod spec_composer;
 mod store;
@@ -10,6 +11,16 @@ mod types;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+
+#[derive(Subcommand)]
+enum InstructionsCmd {
+    /// Show effective instructions for each agent in the current directory
+    Show,
+    /// Scaffold .specr/ with commented template files
+    Init,
+    /// Use LLM to generate instructions from SPEC.md
+    Generate,
+}
 
 #[derive(Parser)]
 #[command(name = "specr", about = "Turn a rough idea into a structured SPEC.md")]
@@ -54,6 +65,11 @@ enum Commands {
         /// Number of parallel task workers. Overrides config.agent.parallel_jobs.
         #[arg(long)]
         jobs: Option<u32>,
+    },
+    /// Manage per-agent instruction files (.specr/)
+    Instructions {
+        #[command(subcommand)]
+        action: InstructionsCmd,
     },
     /// Start Telegram bot polling loop
     Bot,
@@ -111,6 +127,22 @@ async fn main() -> Result<()> {
                 jobs,
             )
             .await?;
+        }
+        Commands::Instructions { action } => {
+            let dir = std::env::current_dir()?;
+            match action {
+                InstructionsCmd::Show => {
+                    instructions::show(&dir);
+                }
+                InstructionsCmd::Init => {
+                    instructions::init(&dir)?;
+                }
+                InstructionsCmd::Generate => {
+                    let api_key = config::resolve_api_key_optional(&config)?;
+                    let client = llm::create_client(&config, &api_key)?;
+                    instructions::generate(&dir, &config, client.as_ref()).await?;
+                }
+            }
         }
         Commands::Bot => {
             telegram::run_bot(&config).await?;

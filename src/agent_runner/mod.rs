@@ -413,6 +413,14 @@ async fn run_single_task(
 
         // e. Spawn coding agent (claude-code or api-agent)
         println!("{} Running coding agent...", "⚙".bold());
+
+        // Load project + task-scoped instructions for the coder
+        let coder_instructions = crate::instructions::load_with_task(
+            workdir,
+            crate::instructions::AgentKind::Coder,
+            &task_detail,
+        );
+
         if config.agent.runner == "api-agent" {
             let api_key = crate::config::resolve_review_api_key(config)?;
             let agent_model = if config.llm.model.is_empty() {
@@ -422,7 +430,12 @@ async fn run_single_task(
             };
             let api_agent =
                 api_agent::ApiCodingAgent::new(api_key, agent_model, config.agent.max_agent_turns);
-            let system = API_AGENT_SYSTEM;
+            // Inject coder instructions into the api-agent system prompt
+            let system = if coder_instructions.is_empty() {
+                API_AGENT_SYSTEM.to_string()
+            } else {
+                format!("{API_AGENT_SYSTEM}\n\n## Project-Specific Instructions\n\n{coder_instructions}")
+            };
             let prompt = match retry_findings.as_deref() {
                 Some(findings) => {
                     let already_done = already_committed_summary(workdir, default_branch).await;
@@ -432,11 +445,14 @@ async fn run_single_task(
                         &task_detail,
                         findings,
                         &already_done,
+                        &coder_instructions,
                     )
                 }
-                None => CodingAgent::build_prompt(task, spec_content, &task_detail),
+                None => {
+                    CodingAgent::build_prompt(task, spec_content, &task_detail, &coder_instructions)
+                }
             };
-            api_agent.run(system, &prompt, workdir).await?;
+            api_agent.run(&system, &prompt, workdir).await?;
         } else {
             let already_done = if retry_findings.is_some() {
                 already_committed_summary(workdir, default_branch).await
@@ -451,6 +467,7 @@ async fn run_single_task(
                     workdir,
                     retry_findings.as_deref(),
                     &already_done,
+                    &coder_instructions,
                 )
                 .await?;
         }
@@ -559,6 +576,7 @@ async fn run_single_task(
                 &review_diff,
                 &commit_log,
                 &review_file_list,
+                workdir,
             ),
         )
         .await

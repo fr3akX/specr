@@ -136,21 +136,40 @@ fn extract_json(response: &str) -> &str {
 }
 
 /// Run all three reviews concurrently, with one automatic retry on invalid JSON.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_reviews(
+    // workdir added
     llm: &dyn LlmClient,
     spec_content: &str,
     task_detail: &str,
     diff: &str,
     commit_log: &str,
     changed_files: &str,
+    workdir: &std::path::Path,
 ) -> Result<ReviewResult> {
+    use crate::instructions::{as_system_appendix, load, AgentKind};
+
+    // Build per-reviewer system prompts with optional project instructions appended
+    let code_sys = format!(
+        "{CODE_REVIEW_SYSTEM}{}",
+        as_system_appendix(&load(workdir, AgentKind::CodeReviewer))
+    );
+    let qa_sys = format!(
+        "{QA_REVIEW_SYSTEM}{}",
+        as_system_appendix(&load(workdir, AgentKind::QaReviewer))
+    );
+    let style_sys = format!(
+        "{STYLE_REVIEW_SYSTEM}{}",
+        as_system_appendix(&load(workdir, AgentKind::StyleReviewer))
+    );
+
     let user_prompt =
         build_review_user_prompt(spec_content, task_detail, diff, commit_log, changed_files);
 
     let (code_resp, qa_resp, style_resp) = tokio::try_join!(
-        llm.complete(CODE_REVIEW_SYSTEM, &user_prompt),
-        llm.complete(QA_REVIEW_SYSTEM, &user_prompt),
-        llm.complete(STYLE_REVIEW_SYSTEM, &user_prompt),
+        llm.complete(&code_sys, &user_prompt),
+        llm.complete(&qa_sys, &user_prompt),
+        llm.complete(&style_sys, &user_prompt),
     )?;
 
     let code_review = parse_finding(&code_resp);
@@ -164,7 +183,7 @@ pub async fn run_reviews(
         .iter()
         .any(|c| c.contains("invalid JSON"))
     {
-        if let Ok(retry_resp) = llm.complete(STYLE_REVIEW_SYSTEM, &user_prompt).await {
+        if let Ok(retry_resp) = llm.complete(&style_sys, &user_prompt).await {
             let retry = parse_finding(&retry_resp);
             if !retry.critical.iter().any(|c| c.contains("invalid JSON")) {
                 style_review = retry;
@@ -293,6 +312,7 @@ mod tests {
             "diff",
             "abc123 add builder",
             "A src/builder.rs",
+            std::path::Path::new("/tmp"),
         )
         .await
         .unwrap();
@@ -335,6 +355,7 @@ mod tests {
             "diff",
             "abc123 add builder",
             "A src/builder.rs",
+            std::path::Path::new("/tmp"),
         )
         .await
         .unwrap();
@@ -364,6 +385,7 @@ mod tests {
             "diff",
             "abc123 add builder",
             "A src/builder.rs",
+            std::path::Path::new("/tmp"),
         )
         .await;
         assert!(result.is_err());

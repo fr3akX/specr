@@ -214,12 +214,19 @@ async fn resolve_conflicts(dir: &Path, task: &Task, llm: &dyn LlmClient, test_cm
             }
         };
 
+        let coord_instructions =
+            crate::instructions::load(dir, crate::instructions::AgentKind::Coordinator);
+        let conflict_system = format!(
+            "{CONFLICT_RESOLVE_SYSTEM}{}",
+            crate::instructions::as_system_appendix(&coord_instructions)
+        );
+
         let user_prompt = format!(
             "Task scope: {}\n\nConflicted file: {file_path}\n\n{content}",
             task.scope
         );
 
-        let resolved = match llm.complete(CONFLICT_RESOLVE_SYSTEM, &user_prompt).await {
+        let resolved = match llm.complete(&conflict_system, &user_prompt).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{} LLM conflict resolution failed: {e}", "⚠".yellow());
@@ -276,12 +283,19 @@ async fn fix_failing_tests(dir: &Path, task: &Task, llm: &dyn LlmClient, test_cm
         }
     }
 
+    let coord_instructions =
+        crate::instructions::load(dir, crate::instructions::AgentKind::Coordinator);
+    let test_fix_system = format!(
+        "{TEST_FIX_SYSTEM}{}",
+        crate::instructions::as_system_appendix(&coord_instructions)
+    );
+
     let user_prompt = format!(
         "Task: {} — {}\nScope: {}\n\nFailing tests:\n{test_output}\n\nRelevant files:{file_context}",
         task.id, task.name, task.scope
     );
 
-    let response = match llm.complete(TEST_FIX_SYSTEM, &user_prompt).await {
+    let response = match llm.complete(&test_fix_system, &user_prompt).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} LLM test-fix call failed: {e}", "⚠".yellow());

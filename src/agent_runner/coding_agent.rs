@@ -18,13 +18,21 @@ impl CodingAgent {
     }
 
     /// Build the prompt for the coding agent.
-    pub fn build_prompt(task: &Task, spec_content: &str, task_detail: &str) -> String {
+    /// `extra_instructions` is appended if non-empty (from .specr/coder.md + task instructions).
+    pub fn build_prompt(
+        task: &Task,
+        spec_content: &str,
+        task_detail: &str,
+        extra_instructions: &str,
+    ) -> String {
         let commit_msg = format!("task {}: {}", task.id, task.name);
+        let instructions_block = crate::instructions::as_system_appendix(extra_instructions);
         format!(
             "You are implementing task {id}: {name}\n\n\
              SPEC.md:\n{spec}\n\n\
              Task details:\n{detail}\n\n\
-             Implement exactly what is described. Stay within the scope defined in \"What NOT to change\".\n\
+             Implement exactly what is described. Stay within the scope defined in \"What NOT to change\".\
+             {instructions}\n\
              When done:\n\
              1. Run: cargo test && cargo clippy -- -D warnings\n\
              2. Stage modified files and commit: git add -u && git add <any-new-files> && git commit -m \"{commit}\"",
@@ -32,18 +40,21 @@ impl CodingAgent {
             name = task.name,
             spec = spec_content,
             detail = task_detail,
+            instructions = instructions_block,
             commit = commit_msg,
         )
     }
 
     /// Build the prompt for a retry with review findings.
     /// `already_done` is a summary of what has been committed so far (git log/diff --stat).
+    #[allow(clippy::too_many_arguments)]
     pub fn build_retry_prompt(
         task: &Task,
         spec_content: &str,
         task_detail: &str,
         findings: &str,
         already_done: &str,
+        extra_instructions: &str,
     ) -> String {
         let done_section = if already_done.trim().is_empty() {
             String::new()
@@ -54,6 +65,7 @@ impl CodingAgent {
                  {already_done}\n\n"
             )
         };
+        let instructions_block = crate::instructions::as_system_appendix(extra_instructions);
         format!(
             "You are implementing task {id}: {name}\n\n\
              SPEC.md:\n{spec}\n\n\
@@ -61,7 +73,8 @@ impl CodingAgent {
              {done}\
              ## Review findings — fix only these remaining issues\n\n\
              {findings}\n\n\
-             Focus on what is still missing. Build on existing work — do not rewrite what is already committed.\n\
+             Focus on what is still missing. Build on existing work — do not rewrite what is already committed.\
+             {instructions}\n\
              When done:\n\
              1. Run: cargo test && cargo clippy -- -D warnings\n\
              2. Stage modified files and commit: git add -u && git add <any-new-files> && git commit -m \"task {id}: {name} (retry)\"",
@@ -71,11 +84,13 @@ impl CodingAgent {
             detail = task_detail,
             done = done_section,
             findings = findings,
+            instructions = instructions_block,
         )
     }
 
     /// Spawn Claude Code with the given prompt.
     /// Streams stdout/stderr to terminal in real time.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         task: &Task,
@@ -84,12 +99,18 @@ impl CodingAgent {
         workdir: &Path,
         retry_findings: Option<&str>,
         already_done: &str,
+        extra_instructions: &str,
     ) -> Result<()> {
         let prompt = match retry_findings {
-            Some(findings) => {
-                Self::build_retry_prompt(task, spec_content, task_detail, findings, already_done)
-            }
-            None => Self::build_prompt(task, spec_content, task_detail),
+            Some(findings) => Self::build_retry_prompt(
+                task,
+                spec_content,
+                task_detail,
+                findings,
+                already_done,
+                extra_instructions,
+            ),
+            None => Self::build_prompt(task, spec_content, task_detail, extra_instructions),
         };
 
         self.spawn_with_prompt(&prompt, workdir).await
@@ -192,7 +213,7 @@ mod tests {
     #[test]
     fn test_build_prompt() {
         let task = make_task();
-        let prompt = CodingAgent::build_prompt(&task, "spec content", "task detail");
+        let prompt = CodingAgent::build_prompt(&task, "spec content", "task detail", "");
         assert!(prompt.contains("task 001: Scaffold project"));
         assert!(prompt.contains("spec content"));
         assert!(prompt.contains("task detail"));
@@ -208,6 +229,7 @@ mod tests {
             "task detail",
             "Critical: missing error handling",
             "Commits:\nabc123 add tests",
+            "",
         );
         assert!(prompt.contains("task 001: Scaffold project"));
         assert!(prompt.contains("Review findings"));
