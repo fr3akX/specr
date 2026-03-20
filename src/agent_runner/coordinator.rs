@@ -180,17 +180,41 @@ pub async fn coordinator_merge(dir: &Path, branch: &str, default_branch: &str) -
     // Make sure we're on the default branch
     git_command(dir, &["checkout", default_branch]).await?;
 
-    // Discard any uncommitted changes to generated lockfiles.
-    // These are left behind by cargo/npm/etc. after previous conflict resolutions.
-    // git refuses to merge over dirty files even when the merge would overwrite them.
-    // Safe to discard: if the merge produces a lockfile conflict, resolve_lockfile()
-    // will regenerate a fresh one anyway.
-    if let Ok(dirty) = git_command(dir, &["diff", "--name-only"]).await {
-        for path in dirty.lines().map(str::trim).filter(|p| !p.is_empty()) {
-            if is_generated_lockfile(path) {
-                git_command(dir, &["checkout", "--", path]).await.ok();
-            }
+    // Ensure a clean working tree before merging.
+    //
+    // git refuses to merge when either:
+    //   (a) tracked files are dirty ("would be overwritten by merge")
+    //   (b) untracked files exist at paths the merge branch would create
+    //         ("untracked working tree files would be overwritten")
+    //
+    // The coordinator's working tree should always be clean between merges.
+    // Anything dirty here is a leftover from a previous conflict-resolution
+    // step (cargo generate-lockfile, LLM-patched files, etc.). It is always
+    // safe to discard: the incoming branch carries the authoritative content.
+    //
+    // Strategy:
+    //   1. `git stash --include-untracked` — saves both tracked dirty files
+    //      and untracked files that would block the merge.
+    //   2. If stash succeeds, drop it immediately (we don't want to pop it
+    //      back on top of the merge result).
+    //   3. If stash has nothing to save (clean tree), it exits 0 with
+    //      "No local changes to save" — harmless.
+    let stash_out = git_command(
+        dir,
+        &[
+            "stash",
+            "--include-untracked",
+            "-m",
+            "specr: pre-merge auto-stash",
+        ],
+    )
+    .await;
+    match &stash_out {
+        Ok(msg) if !msg.contains("No local changes") => {
+            // Something was stashed — drop it immediately (it's leftover noise).
+            git_command(dir, &["stash", "drop"]).await.ok();
         }
+        _ => {} // Nothing stashed or command failed — proceed either way.
     }
 
     // Run merge directly to capture both stdout and stderr without bailing on non-zero.
