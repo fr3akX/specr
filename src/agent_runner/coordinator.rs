@@ -183,38 +183,36 @@ pub async fn coordinator_merge(dir: &Path, branch: &str, default_branch: &str) -
     // Ensure a clean working tree before merging.
     //
     // git refuses to merge when either:
-    //   (a) tracked files are dirty ("would be overwritten by merge")
-    //   (b) untracked files exist at paths the merge branch would create
+    //   (a) tracked files are dirty  ("your local changes would be overwritten")
+    //   (b) untracked files exist at paths the merge branch creates
     //         ("untracked working tree files would be overwritten")
     //
-    // The coordinator's working tree should always be clean between merges.
-    // Anything dirty here is a leftover from a previous conflict-resolution
-    // step (cargo generate-lockfile, LLM-patched files, etc.). It is always
-    // safe to discard: the incoming branch carries the authoritative content.
-    //
-    // Strategy:
-    //   1. `git stash --include-untracked` — saves both tracked dirty files
-    //      and untracked files that would block the merge.
-    //   2. If stash succeeds, drop it immediately (we don't want to pop it
-    //      back on top of the merge result).
-    //   3. If stash has nothing to save (clean tree), it exits 0 with
-    //      "No local changes to save" — harmless.
-    let stash_out = git_command(
-        dir,
-        &[
-            "stash",
-            "--include-untracked",
-            "-m",
-            "specr: pre-merge auto-stash",
-        ],
-    )
-    .await;
-    match &stash_out {
-        Ok(msg) if !msg.contains("No local changes") => {
-            // Something was stashed — drop it immediately (it's leftover noise).
-            git_command(dir, &["stash", "drop"]).await.ok();
-        }
-        _ => {} // Nothing stashed or command failed — proceed either way.
+    // These files are LEGITIMATE — created/modified by a previous worker or
+    // conflict-resolution step that did not commit them yet. The correct
+    // action is to commit them so git can do a proper three-way merge and
+    // surface real conflicts where they exist. Discarding would lose work.
+    let has_dirty = git_command(dir, &["status", "--porcelain"])
+        .await
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    if has_dirty {
+        eprintln!(
+            "{} Working tree has uncommitted changes — committing before merge of {}...",
+            "⚙".cyan(),
+            branch
+        );
+        git_command(dir, &["add", "-A"]).await.ok();
+        git_command(
+            dir,
+            &[
+                "commit",
+                "-m",
+                "chore: coordinator pre-merge commit (uncommitted changes)",
+            ],
+        )
+        .await
+        .ok();
     }
 
     // Run merge directly to capture both stdout and stderr without bailing on non-zero.
