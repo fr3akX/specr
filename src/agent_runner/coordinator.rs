@@ -148,12 +148,13 @@ pub fn effective_test_command(config: &Config, dir: &Path) -> String {
 
 /// Run the test command in `dir`. Returns Ok if exit code is 0.
 pub async fn run_test_command(dir: &Path, cmd: &str) -> Result<String> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.is_empty() {
+    if cmd.trim().is_empty() {
         anyhow::bail!("Empty test command");
     }
-    let output = tokio::process::Command::new(parts[0])
-        .args(&parts[1..])
+    // Always run via sh -c so the command string can use shell syntax:
+    // semicolons, &&, ||, $?, subshells, pipes, etc.
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", cmd])
         .current_dir(dir)
         .output()
         .await
