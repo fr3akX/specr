@@ -350,36 +350,16 @@ async fn resolve_conflicts(dir: &Path, task: &Task, llm: &dyn LlmClient, test_cm
         conflicted.len()
     );
 
-    // Pre-pass: handle generated/lockfiles by regenerating them instead of LLM resolution.
-    // These files are deterministically produced by tooling; LLM text merging is wrong for them.
-    let mut remaining: Vec<String> = Vec::new();
-    for file_path in &conflicted {
-        if is_generated_lockfile(file_path) {
-            eprintln!(
-                "{} {} is a generated lockfile — regenerating...",
-                "⚙".cyan(),
-                file_path
-            );
-            if resolve_lockfile(dir, file_path).await {
-                eprintln!("{} {} regenerated OK", "✔".green(), file_path);
-            } else {
-                eprintln!(
-                    "{} {} regeneration failed — falling back to --theirs",
-                    "⚠".yellow(),
-                    file_path
-                );
-                // Last resort: take the incoming side so the merge can proceed
-                git_command(dir, &["checkout", "--theirs", file_path])
-                    .await
-                    .ok();
-                git_command(dir, &["add", file_path]).await.ok();
-            }
-        } else {
-            remaining.push(file_path.clone());
-        }
-    }
+    // Split into source files and generated lockfiles.
+    // IMPORTANT: source files MUST be resolved first — lockfile regeneration
+    // tools (cargo, npm, etc.) require the project manifest (Cargo.toml,
+    // package.json, etc.) to be conflict-free before they can run.
+    let (lockfiles, source_files): (Vec<String>, Vec<String>) = conflicted
+        .into_iter()
+        .partition(|p| is_generated_lockfile(p));
 
-    for file_path in &remaining {
+    // Pass 1: LLM-resolve all source files.
+    for file_path in &source_files {
         let full_path = dir.join(file_path);
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
@@ -411,6 +391,30 @@ async fn resolve_conflicts(dir: &Path, task: &Task, llm: &dyn LlmClient, test_cm
 
         if std::fs::write(&full_path, &resolved).is_err() {
             return false;
+        }
+    }
+
+    // Pass 2: regenerate lockfiles now that source files are conflict-free.
+    // The manifest files (Cargo.toml, package.json, etc.) are now valid TOML/JSON
+    // so the package manager can compute a correct lockfile.
+    for file_path in &lockfiles {
+        eprintln!(
+            "{} {} is a generated lockfile — regenerating...",
+            "⚙".cyan(),
+            file_path
+        );
+        if resolve_lockfile(dir, file_path).await {
+            eprintln!("{} {} regenerated OK", "✔".green(), file_path);
+        } else {
+            eprintln!(
+                "{} {} regeneration failed — falling back to --theirs",
+                "⚠".yellow(),
+                file_path
+            );
+            git_command(dir, &["checkout", "--theirs", file_path])
+                .await
+                .ok();
+            git_command(dir, &["add", file_path]).await.ok();
         }
     }
 
