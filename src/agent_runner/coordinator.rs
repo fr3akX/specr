@@ -30,11 +30,19 @@ use super::coding_agent::git_command;
 // ── System prompt for LLM conflict / test-failure resolution ───────────────
 
 const CONFLICT_RESOLVE_SYSTEM: &str = "\
-You are a senior software engineer resolving a git merge conflict. You will be given \
-the conflicted file content (with <<<<<<< / ======= / >>>>>>> markers), the scopes of \
-both tasks involved, and failing test output. Output ONLY the fully resolved file \
-content — no explanation, no markdown fences, just the raw file text that makes all \
-tests pass.";
+You are a senior software engineer resolving a git merge conflict.\
+\n\
+\nYou will be given a conflicted file (with <<<<<<< HEAD / ======= / >>>>>>> markers).\
+\nYour job: output the fully resolved file content.\
+\n\
+\nSTRICT OUTPUT RULES — violating these will break the build:\
+\n1. Output RAW FILE CONTENT ONLY. No explanation. No commentary. No preamble.\
+\n2. Do NOT start your response with any English prose or analysis.\
+\n3. Do NOT wrap the output in markdown code fences (no ```python, no ```, no backticks).\
+\n4. The very first character of your response must be the first character of the resolved file.\
+\n5. Merge both sides intelligently: keep additive changes from both, resolve true conflicts\
+\n   by preferring the version that satisfies the task scope.\
+\n6. The output must be syntactically valid source code in the file's language.";
 
 const TEST_FIX_SYSTEM: &str = "\
 You are a senior software engineer. Integration tests are failing after merging a task branch. \
