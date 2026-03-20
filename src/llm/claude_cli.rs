@@ -49,22 +49,32 @@ impl LlmClient for ClaudeCliClient {
 
         cmd.env("NO_COLOR", "1");
 
-        // Ensure claude cannot read from our terminal.
-        cmd.stdin(Stdio::null());
+        // Pass prompt via stdin to avoid the claude CLI misinterpreting
+        // prompts that start with `---` (YAML frontmatter) as CLI flags.
+        // Use `-p -` to signal "read prompt from stdin" when supported,
+        // otherwise pipe via stdin with the positional arg as a dash.
+        cmd.arg("-");
+
+        cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
         // Run from /tmp so claude does not scan the caller's project directory.
-        // In -p mode, claude still indexes the cwd as workspace context — this
-        // prevents it from spending time (or hanging) on large directory trees.
         cmd.current_dir(std::env::temp_dir());
 
-        // Prompt as positional argument.
-        cmd.arg(user);
-
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to spawn claude CLI at '{}'", self.bin))?;
+
+        // Write the prompt to stdin and close it so the process sees EOF.
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(user.as_bytes())
+                .await
+                .context("Failed to write prompt to claude CLI stdin")?;
+            // stdin is dropped here, closing the pipe (EOF signal)
+        }
 
         let timeout = Duration::from_secs(self.timeout_seconds);
         let output = match time::timeout(timeout, child.wait_with_output()).await {
