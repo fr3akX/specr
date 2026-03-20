@@ -83,7 +83,9 @@ async fn main() -> Result<()> {
         return tui::run();
     }
 
-    let config = config::load_config()?;
+    // Load global config, then overlay .specr/config.toml from cwd if present.
+    let cwd = std::env::current_dir()?;
+    let config = config::load_config_with_project(&cwd)?;
 
     match cli.command {
         Commands::Compose { idea } => {

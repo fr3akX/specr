@@ -199,6 +199,61 @@ pub fn load_config() -> Result<Config> {
     load_config_from(&path)
 }
 
+/// Project-level agent config overrides from `.specr/config.toml`.
+/// Only `[agent]` section is read — secrets stay in the global config.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectAgentOverrides {
+    #[serde(default)]
+    agent: ProjectAgentFields,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectAgentFields {
+    test_command: Option<String>,
+    parallel_jobs: Option<u32>,
+    worktree_base: Option<String>,
+    resolve_conflicts: Option<bool>,
+    runner: Option<String>,
+    runner_bin: Option<String>,
+    max_agent_turns: Option<u32>,
+}
+
+/// Load global config then overlay `.specr/config.toml` from `workdir` (if present).
+/// Only non-secret agent fields are overridable at the project level.
+pub fn load_config_with_project(workdir: &Path) -> Result<Config> {
+    let mut config = load_config()?;
+    let project_cfg = workdir.join(".specr").join("config.toml");
+    if project_cfg.exists() {
+        let content = std::fs::read_to_string(&project_cfg)
+            .with_context(|| format!("Failed to read {}", project_cfg.display()))?;
+        let overrides: ProjectAgentOverrides = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", project_cfg.display()))?;
+        let o = &overrides.agent;
+        if let Some(v) = o.test_command.clone() {
+            config.agent.test_command = v;
+        }
+        if let Some(v) = o.parallel_jobs {
+            config.agent.parallel_jobs = v;
+        }
+        if let Some(v) = o.worktree_base.clone() {
+            config.agent.worktree_base = v;
+        }
+        if let Some(v) = o.resolve_conflicts {
+            config.agent.resolve_conflicts = v;
+        }
+        if let Some(v) = o.runner.clone() {
+            config.agent.runner = v;
+        }
+        if let Some(v) = o.runner_bin.clone() {
+            config.agent.runner_bin = v;
+        }
+        if let Some(v) = o.max_agent_turns {
+            config.agent.max_agent_turns = v;
+        }
+    }
+    Ok(config)
+}
+
 /// Resolve the API key by reading the environment variable named in config.
 pub fn resolve_api_key(config: &Config) -> Result<String> {
     let env_name = &config.llm.api_key_env;
