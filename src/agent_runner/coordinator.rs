@@ -180,6 +180,19 @@ pub async fn coordinator_merge(dir: &Path, branch: &str, default_branch: &str) -
     // Make sure we're on the default branch
     git_command(dir, &["checkout", default_branch]).await?;
 
+    // Discard any uncommitted changes to generated lockfiles.
+    // These are left behind by cargo/npm/etc. after previous conflict resolutions.
+    // git refuses to merge over dirty files even when the merge would overwrite them.
+    // Safe to discard: if the merge produces a lockfile conflict, resolve_lockfile()
+    // will regenerate a fresh one anyway.
+    if let Ok(dirty) = git_command(dir, &["diff", "--name-only"]).await {
+        for path in dirty.lines().map(str::trim).filter(|p| !p.is_empty()) {
+            if is_generated_lockfile(path) {
+                git_command(dir, &["checkout", "--", path]).await.ok();
+            }
+        }
+    }
+
     // Run merge directly to capture both stdout and stderr without bailing on non-zero.
     // git merge exits 1 on conflicts AND on genuine errors — we distinguish by checking
     // for conflict markers in the working tree after a non-zero exit.
