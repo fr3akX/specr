@@ -8,6 +8,7 @@ use crate::types::{Task, TaskStatus};
 const SPEC_FILENAME: &str = "SPEC.md";
 const TASKS_FILENAME: &str = "TASKS.md";
 const TASKS_DIR: &str = "tasks";
+const ISSUES_FILENAME: &str = "ISSUES.md";
 
 /// Read SPEC.md from the given directory.
 pub fn read_spec(dir: &Path) -> Result<String> {
@@ -136,6 +137,17 @@ pub fn update_task_status(dir: &Path, task_id: &str, new_status: TaskStatus) -> 
     task.status = new_status;
 
     write_tasks(dir, &tasks, version, &project_name)
+}
+
+/// Read ISSUES.md from the given directory.
+pub fn read_issues(dir: &Path) -> Result<String> {
+    let path = dir.join(ISSUES_FILENAME);
+    std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "No ISSUES.md found in {}. Create an ISSUES.md with ## headings for each issue.",
+            dir.display()
+        )
+    })
 }
 
 /// Increment the spec-version in SPEC.md frontmatter.
@@ -383,6 +395,25 @@ mod tests {
 
         let (updated, _) = read_tasks(tmp.path()).unwrap();
         assert_eq!(updated[0].status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn test_read_issues() {
+        let tmp = TempDir::new().unwrap();
+        let content = "# Issues\n\n## [BUG] Login fails\nUsers cannot log in.\n";
+        std::fs::write(tmp.path().join("ISSUES.md"), content).unwrap();
+
+        let read_content = read_issues(tmp.path()).unwrap();
+        assert_eq!(read_content, content);
+    }
+
+    #[test]
+    fn test_read_issues_missing() {
+        let tmp = TempDir::new().unwrap();
+        let result = read_issues(tmp.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("No ISSUES.md found"));
     }
 
     #[test]

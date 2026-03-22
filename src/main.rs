@@ -66,6 +66,8 @@ enum Commands {
         #[arg(long)]
         jobs: Option<u32>,
     },
+    /// Generate tasks from ISSUES.md
+    Issues,
     /// Manage per-agent instruction files (.specr/)
     Instructions {
         #[command(subcommand)]
@@ -109,6 +111,11 @@ async fn main() -> Result<()> {
             let api_key = config::resolve_api_key_optional(&config)?;
             let client = llm::create_client(&config, &api_key)?;
             task_generator::drift(&config, client.as_ref(), Some(&base)).await?;
+        }
+        Commands::Issues => {
+            let api_key = config::resolve_api_key_optional(&config)?;
+            let client = llm::create_client(&config, &api_key)?;
+            task_generator::issues(&config, client.as_ref()).await?;
         }
         Commands::Split { task } => {
             let api_key = config::resolve_api_key_optional(&config)?;

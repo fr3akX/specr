@@ -79,6 +79,35 @@ Output a JSON array of objects with this schema:
 
 If no new tasks are required (the diff is purely cosmetic or already covered), output an empty array: []";
 
+const ISSUES_SYSTEM: &str = "\
+You are a senior software architect. Given a list of issues (bugs, feature requests, improvements) \
+and the current task list, generate tasks to address each issue. Skip issues that are already \
+covered by existing tasks.
+
+Rules:
+- Each task must produce ONE verifiable output
+- Size tasks: S (<2h), M (~half day), L (>half day, must be split)
+- Make dependencies explicit — new tasks may depend on existing task IDs
+- Done-when must be machine-checkable
+- Output JSON only, no commentary
+
+Output a JSON array of objects with this schema:
+[
+  {
+    \"id\": \"NNN\",
+    \"name\": \"Short imperative task name\",
+    \"size\": \"S\",
+    \"depends_on\": [\"001\"],
+    \"done_when\": \"machine-checkable criterion\",
+    \"scope\": \"What to build/change\",
+    \"files_to_touch\": [\"src/foo.rs\"],
+    \"not_to_change\": [],
+    \"interface\": null
+  }
+]
+
+If all issues are already covered by existing tasks, output an empty array: []";
+
 /// Run the full task generation pipeline.
 pub async fn run(config: &Config, client: &dyn LlmClient) -> Result<()> {
     run_with_io(config, client, &mut io::stdin().lock(), &mut io::stdout()).await
@@ -529,6 +558,221 @@ pub async fn drift_with_io<R: BufRead, W: Write>(
     // Step 7: Append new tasks to TASKS.md
     // Combine existing + new, preserving existing exactly.
     // Use the higher spec version to reflect the update.
+    let new_spec_version = spec_version.max(existing_spec_version);
+    let mut all_tasks = existing_task_list;
+    all_tasks.extend(new_tasks.clone());
+
+    store::write_tasks(&dir, &all_tasks, new_spec_version, &project_name)?;
+
+    // Write detail files for new M/L tasks
+    let mut detail_count = 0;
+    for task in &new_tasks {
+        if task.has_detail_file() {
+            store::write_task_detail(&dir, task)?;
+            detail_count += 1;
+        }
+    }
+
+    writeln!(
+        writer,
+        "\n{} {} new task(s) appended to TASKS.md{}.",
+        "Done!".green().bold(),
+        new_tasks.len(),
+        if detail_count > 0 {
+            format!(" ({detail_count} detail files written)")
+        } else {
+            String::new()
+        }
+    )?;
+
+    Ok(())
+}
+
+/// Generate tasks from ISSUES.md.
+pub async fn issues(config: &Config, client: &dyn LlmClient) -> Result<()> {
+    issues_with_io(
+        config,
+        client,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+    )
+    .await
+}
+
+/// Issues with injectable I/O for testing.
+pub async fn issues_with_io<R: BufRead, W: Write>(
+    _config: &Config,
+    client: &dyn LlmClient,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let dir = std::env::current_dir()?;
+
+    // Step 1: Read ISSUES.md
+    let issues_content = store::read_issues(&dir)?;
+
+    writeln!(writer, "\n{}", "=== specr issues ===".bold().cyan())?;
+
+    // Step 2: Read existing tasks (if any)
+    let existing_tasks = store::read_tasks(&dir).ok();
+    let (existing_task_list, existing_spec_version) = existing_tasks
+        .as_ref()
+        .map(|(tasks, ver)| (tasks.clone(), *ver))
+        .unwrap_or_default();
+
+    let next_id = existing_task_list
+        .iter()
+        .filter_map(|t| t.id.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    // Step 3: Read SPEC.md (if any) for project context
+    let spec_content = store::read_spec(&dir).ok();
+    let (spec_version, project_name) = spec_content
+        .as_ref()
+        .map(|s| (extract_spec_version(s), extract_project_name(s)))
+        .unwrap_or((1, "unnamed".to_string()));
+
+    writeln!(
+        writer,
+        "Project: {}  spec-version: {}\n",
+        project_name.bold(),
+        spec_version
+    )?;
+    writeln!(
+        writer,
+        "Existing tasks: {}  Next ID will start at: {:03}",
+        existing_task_list.len(),
+        next_id
+    )?;
+
+    // Build a concise summary of existing tasks for the LLM
+    let existing_summary = if existing_task_list.is_empty() {
+        "No existing tasks.".to_string()
+    } else {
+        existing_task_list
+            .iter()
+            .map(|t| {
+                format!(
+                    "- {} [{}] {}: {} ({})",
+                    t.id,
+                    match t.size {
+                        TaskSize::S => "S",
+                        TaskSize::M => "M",
+                        TaskSize::L => "L",
+                    },
+                    t.name,
+                    t.done_when,
+                    match t.status {
+                        TaskStatus::Done => "done",
+                        TaskStatus::Open => "open",
+                        TaskStatus::InProgress => "in-progress",
+                        TaskStatus::Failed => "failed",
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Step 4: Call LLM
+    writeln!(
+        writer,
+        "\n{}",
+        "Generating tasks from issues via LLM...".cyan()
+    )?;
+
+    let spec_section = spec_content
+        .as_ref()
+        .map(|s| format!("## Project SPEC.md (for context)\n\n{s}\n\n"))
+        .unwrap_or_default();
+
+    let user_prompt = format!(
+        "{spec_section}\
+         ## ISSUES.md\n\n{issues}\n\n\
+         ## Existing tasks (do not duplicate these)\n\n{existing}\n\n\
+         ## Instructions\n\
+         Start task IDs from {next_id:03}. Generate a task for each issue that is not already \
+         covered by an existing task. Output JSON array only.",
+        issues = issues_content,
+        existing = existing_summary,
+        next_id = next_id,
+    );
+
+    let llm_response = client.complete(ISSUES_SYSTEM, &user_prompt).await?;
+
+    let raw_json = extract_json(&llm_response);
+    let mut new_tasks: Vec<Task> =
+        parse_task_json(&raw_json).context("Failed to parse LLM issues response")?;
+
+    // Step 5: Force-renumber IDs from next_id
+    for (i, task) in new_tasks.iter_mut().enumerate() {
+        let id = format!("{:03}", next_id + i as u32);
+        task.branch = Task::default_branch(&id, &task.name);
+        task.id = id;
+    }
+
+    if new_tasks.is_empty() {
+        writeln!(
+            writer,
+            "{}",
+            "All issues are already covered by existing tasks.".green()
+        )?;
+        return Ok(());
+    }
+
+    // Step 6: Display proposed new tasks
+    writeln!(
+        writer,
+        "\n{}\n",
+        "--- Proposed new tasks ---".bold().green()
+    )?;
+    for task in &new_tasks {
+        let size_badge = match task.size {
+            TaskSize::S => "[S]".green(),
+            TaskSize::M => "[M]".yellow(),
+            TaskSize::L => "[L]".red(),
+        };
+        let deps = if task.depends_on.is_empty() {
+            "\u{2014}".to_string()
+        } else {
+            task.depends_on.join(", ")
+        };
+        writeln!(
+            writer,
+            "  {} {} · {}  [{}]  deps: {}",
+            task.id,
+            size_badge,
+            task.name,
+            task.done_when.dimmed(),
+            deps
+        )?;
+        if task.size == TaskSize::L {
+            writeln!(
+                writer,
+                "    {} This task is size L and should be split.",
+                "!".red().bold()
+            )?;
+        }
+    }
+
+    // Step 7: Approval gate
+    writeln!(writer)?;
+    writeln!(writer, "{}", "Append these tasks? (yes / no)".bold())?;
+    write!(writer, "> ")?;
+    writer.flush()?;
+
+    let mut input = String::new();
+    reader.read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    if input != "yes" && input != "y" {
+        writeln!(writer, "{}", "Aborted. No files written.".yellow())?;
+        return Ok(());
+    }
+
+    // Step 8: Append new tasks to TASKS.md
     let new_spec_version = spec_version.max(existing_spec_version);
     let mut all_tasks = existing_task_list;
     all_tasks.extend(new_tasks.clone());
@@ -1015,5 +1259,46 @@ mod tests {
         assert!(DRIFT_SYSTEM.contains("ONLY the new tasks"));
         assert!(DRIFT_SYSTEM.contains("empty array"));
         assert!(DRIFT_SYSTEM.contains("depends_on"));
+    }
+
+    // ── issues tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_issues_system_prompt_contains_key_phrases() {
+        assert!(ISSUES_SYSTEM.contains("issues"));
+        assert!(ISSUES_SYSTEM.contains("already covered"));
+        assert!(ISSUES_SYSTEM.contains("empty array"));
+        assert!(ISSUES_SYSTEM.contains("depends_on"));
+    }
+
+    #[tokio::test]
+    async fn test_issues_reads_and_produces_tasks() {
+        // Set up a temp dir with ISSUES.md and run issues_with_io against a mock LLM.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let issues_content = "# Issues\n\n## [BUG] Login fails\nUsers cannot log in.\n";
+        std::fs::write(tmp.path().join("ISSUES.md"), issues_content).unwrap();
+
+        // Mock LLM returns one task
+        let mock = MockLlm {
+            response: r#"[{"id":"001","name":"Fix login","size":"S","depends_on":[],"done_when":"login works"}]"#.to_string(),
+        };
+
+        // Provide "no" to approval gate so we don't write files
+        let mut input = io::Cursor::new(b"no\n");
+        let mut output = Vec::new();
+
+        // We need to be in the temp dir for issues_with_io to find ISSUES.md
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let config = crate::config::Config::default();
+        let result = issues_with_io(&config, &mock, &mut input, &mut output).await;
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert!(result.is_ok());
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("Fix login"));
+        assert!(output_str.contains("Proposed new tasks"));
     }
 }
